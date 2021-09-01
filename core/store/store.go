@@ -17,7 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/gracefulpanic"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/store/config"
-	"github.com/smartcontractkit/chainlink/core/store/migrations"
+	"github.com/smartcontractkit/chainlink/core/store/migrate"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/store/orm"
 	"github.com/smartcontractkit/chainlink/core/utils"
@@ -189,7 +189,7 @@ func initializeORM(cfg config.GeneralConfig, shutdownSignal gracefulpanic.Signal
 		dbOrm.SetLogging(cfg.LogSQLStatements() || cfg.LogSQLMigrations())
 
 		err = dbOrm.RawDBWithAdvisoryLock(func(db *gorm.DB) error {
-			return migrations.Migrate(db)
+			return migrate.Migrate(postgres.UnwrapGormDB(db).DB)
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "initializeORM#Migrate")

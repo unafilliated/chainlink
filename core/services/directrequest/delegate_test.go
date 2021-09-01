@@ -14,6 +14,9 @@ import (
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/operator_wrapper"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/services/directrequest"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/log"
@@ -24,20 +27,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	null "gopkg.in/guregu/null.v4"
 )
 
 func TestDelegate_ServicesForSpec(t *testing.T) {
-	ethClient := cltest.NewEthClientMock(t)
-	broadcaster := new(log_mocks.Broadcaster)
+	ethClient := cltest.NewEthClientMockWithDefaultChain(t)
 	runner := new(pipeline_mocks.Runner)
+	db := pgtest.NewGormDB(t)
+	cfg := configtest.NewTestGeneralConfig(t)
+	cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient})
 
-	store, cleanupDB := cltest.NewStore(t)
-	defer cleanupDB()
-
-	config := testConfig{
-		minIncomingConfirmations: 1,
-	}
-	delegate := directrequest.NewDelegate(broadcaster, runner, nil, ethClient, store.DB, config)
+	delegate := directrequest.NewDelegate(cfg.CreateProductionLogger(), runner, nil, db, cc)
 
 	t.Run("Spec without DirectRequestSpec", func(t *testing.T) {
 		spec := job.Job{}
@@ -63,27 +64,31 @@ type DirectRequestUniverse struct {
 	cleanup        func()
 }
 
-func NewDirectRequestUniverseWithConfig(t *testing.T, drConfig testConfig) *DirectRequestUniverse {
-	gethClient := cltest.NewEthClientMock(t)
+func NewDirectRequestUniverseWithConfig(t *testing.T, cfg *configtest.TestGeneralConfig, specF func(spec *job.Job)) *DirectRequestUniverse {
+	ethClient := cltest.NewEthClientMockWithDefaultChain(t)
 	broadcaster := new(log_mocks.Broadcaster)
 	runner := new(pipeline_mocks.Runner)
+	broadcaster.On("AddDependents", 1)
 
-	config := cltest.NewTestEVMConfig(t)
-	store, cleanupDB := cltest.NewStoreWithConfig(t, config)
-	orm, eventBroadcaster, cleanupPipeline := cltest.NewPipelineORM(t, config, store.DB)
+	db := pgtest.NewGormDB(t)
+	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, LogBroadcaster: broadcaster})
+	orm, eventBroadcaster, cleanupPipeline := cltest.NewPipelineORM(t, cfg, db)
 
-	jobORM := job.NewORM(store.DB, config, orm, eventBroadcaster, &postgres.NullAdvisoryLocker{})
+	keyStore := cltest.NewKeyStore(t, db)
+	jobORM := job.NewORM(db, cc, orm, eventBroadcaster, &postgres.NullAdvisoryLocker{}, keyStore)
 
 	cleanup := func() {
-		cleanupDB()
 		cleanupPipeline()
 		jobORM.Close()
 	}
 
-	delegate := directrequest.NewDelegate(broadcaster, runner, orm, gethClient, store.DB, drConfig)
+	delegate := directrequest.NewDelegate(cfg.CreateProductionLogger(), runner, orm, db, cc)
 
 	spec := cltest.MakeDirectRequestJobSpec(t)
 	spec.ExternalJobID = uuid.NewV4()
+	if specF != nil {
+		specF(spec)
+	}
 	jb, err := jobORM.CreateJob(context.Background(), spec, spec.Pipeline)
 	require.NoError(t, err)
 	serviceArray, err := delegate.ServicesForSpec(jb)
@@ -109,10 +114,9 @@ func NewDirectRequestUniverseWithConfig(t *testing.T, drConfig testConfig) *Dire
 }
 
 func NewDirectRequestUniverse(t *testing.T) *DirectRequestUniverse {
-	drConfig := testConfig{
-		minIncomingConfirmations: 1,
-	}
-	return NewDirectRequestUniverseWithConfig(t, drConfig)
+	cfg := configtest.NewTestGeneralConfig(t)
+	cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+	return NewDirectRequestUniverseWithConfig(t, cfg, nil)
 }
 
 func (uni *DirectRequestUniverse) Cleanup() {
@@ -120,7 +124,6 @@ func (uni *DirectRequestUniverse) Cleanup() {
 }
 
 func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
-
 	t.Run("Log is an OracleRequest", func(t *testing.T) {
 		uni := NewDirectRequestUniverse(t)
 		defer uni.Cleanup()
@@ -153,6 +156,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		err := uni.service.Start()
 		require.NoError(t, err)
 
+		require.NotNil(t, uni.listener, "listener was nil; expected broadcaster.Register to have been called")
 		// check if the job exists under the correct ID
 		drJob, jErr := uni.jobORM.FindJob(context.Background(), uni.listener.JobID())
 		require.NoError(t, jErr)
@@ -331,11 +335,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 	})
 
 	t.Run("Log has sufficient funds", func(t *testing.T) {
-		drConfig := testConfig{
-			minIncomingConfirmations: 1,
-			minimumContractPayment:   assets.NewLink(100),
-		}
-		uni := NewDirectRequestUniverseWithConfig(t, drConfig)
+		cfg := configtest.NewTestGeneralConfig(t)
+		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		uni := NewDirectRequestUniverseWithConfig(t, cfg, nil)
 		defer uni.Cleanup()
 
 		log := new(log_mocks.Broadcast)
@@ -381,11 +384,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 	})
 
 	t.Run("Log has insufficient funds", func(t *testing.T) {
-		drConfig := testConfig{
-			minIncomingConfirmations: 1,
-			minimumContractPayment:   assets.NewLink(100),
-		}
-		uni := NewDirectRequestUniverseWithConfig(t, drConfig)
+		cfg := configtest.NewTestGeneralConfig(t)
+		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		uni := NewDirectRequestUniverseWithConfig(t, cfg, nil)
 		defer uni.Cleanup()
 
 		log := new(log_mocks.Broadcast)
@@ -419,17 +421,103 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		uni.logBroadcaster.AssertExpectations(t)
 		uni.runner.AssertExpectations(t)
 	})
-}
 
-type testConfig struct {
-	minIncomingConfirmations uint32
-	minimumContractPayment   *assets.Link
-}
+	t.Run("requesters is specified and log is requested by a whitelisted address", func(t *testing.T) {
+		requester := cltest.NewAddress()
+		cfg := configtest.NewTestGeneralConfig(t)
+		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		uni := NewDirectRequestUniverseWithConfig(t, cfg, func(jb *job.Job) {
+			jb.DirectRequestSpec.Requesters = []common.Address{cltest.NewAddress(), requester}
+		})
+		defer uni.Cleanup()
 
-func (c testConfig) MinIncomingConfirmations() uint32 {
-	return c.minIncomingConfirmations
-}
+		log := new(log_mocks.Broadcast)
+		defer log.AssertExpectations(t)
 
-func (c testConfig) MinimumContractPayment() *assets.Link {
-	return c.minimumContractPayment
+		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
+		logOracleRequest := operator_wrapper.OperatorOracleRequest{
+			CancelExpiration: big.NewInt(0),
+			Payment:          big.NewInt(100),
+			Requester:        requester,
+		}
+		log.On("RawLog").Return(types.Log{
+			Topics: []common.Hash{
+				{},
+				uni.spec.ExternalIDEncodeStringToTopic(),
+			},
+		})
+		log.On("DecodedLog").Return(&logOracleRequest)
+		markConsumedLogAwaiter := cltest.NewAwaiter()
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			markConsumedLogAwaiter.ItHappened()
+		}).Return(nil)
+
+		runBeganAwaiter := cltest.NewAwaiter()
+		uni.runner.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			runBeganAwaiter.ItHappened()
+			fn := args.Get(4).(func(*gorm.DB) error)
+			fn(nil)
+		}).Once().Return(false, nil)
+
+		err := uni.service.Start()
+		require.NoError(t, err)
+
+		// check if the job exists under the correct ID
+		drJob, jErr := uni.jobORM.FindJob(context.Background(), uni.listener.JobID())
+		require.NoError(t, jErr)
+		require.Equal(t, drJob.ID, uni.listener.JobID())
+		require.NotNil(t, drJob.DirectRequestSpec)
+
+		uni.listener.HandleLog(log)
+
+		runBeganAwaiter.AwaitOrFail(t, 5*time.Second)
+
+		uni.service.Close()
+		uni.logBroadcaster.AssertExpectations(t)
+		uni.runner.AssertExpectations(t)
+	})
+
+	t.Run("requesters is specified and log is requested by a non-whitelisted address", func(t *testing.T) {
+		requester := cltest.NewAddress()
+		cfg := configtest.NewTestGeneralConfig(t)
+		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		uni := NewDirectRequestUniverseWithConfig(t, cfg, func(jb *job.Job) {
+			jb.DirectRequestSpec.Requesters = []common.Address{cltest.NewAddress(), cltest.NewAddress()}
+		})
+		defer uni.Cleanup()
+
+		log := new(log_mocks.Broadcast)
+		defer log.AssertExpectations(t)
+
+		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
+		logOracleRequest := operator_wrapper.OperatorOracleRequest{
+			CancelExpiration: big.NewInt(0),
+			Payment:          big.NewInt(100),
+			Requester:        requester,
+		}
+		log.On("RawLog").Return(types.Log{
+			Topics: []common.Hash{
+				{},
+				uni.spec.ExternalIDEncodeStringToTopic(),
+			},
+		})
+		log.On("DecodedLog").Return(&logOracleRequest)
+		markConsumedLogAwaiter := cltest.NewAwaiter()
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			markConsumedLogAwaiter.ItHappened()
+		}).Return(nil)
+
+		err := uni.service.Start()
+		require.NoError(t, err)
+
+		uni.listener.HandleLog(log)
+
+		markConsumedLogAwaiter.AwaitOrFail(t, 5*time.Second)
+
+		uni.service.Close()
+		uni.logBroadcaster.AssertExpectations(t)
+		uni.runner.AssertExpectations(t)
+	})
 }

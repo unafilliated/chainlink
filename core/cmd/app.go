@@ -143,12 +143,16 @@ func NewApp(client *Client) *cli.App {
 				},
 				{
 					Name:   "setgasprice",
-					Usage:  "Set the minimum gas price to use for outgoing transactions",
-					Action: client.SetMinimumGasPrice,
+					Usage:  "Set the default gas price to use for outgoing transactions",
+					Action: client.SetEvmGasPriceDefault,
 					Flags: []cli.Flag{
 						cli.BoolFlag{
 							Name:  "gwei",
 							Usage: "Specify amount in gwei",
+						},
+						cli.StringFlag{
+							Name:  "evmChainID",
+							Usage: "(optional) specify the chain ID for which to make the update",
 						},
 					},
 				},
@@ -479,19 +483,6 @@ func NewApp(client *Client) *cli.App {
 							Name: "list", Usage: "List the VRF keys",
 							Action: client.ListVRFKeys,
 						},
-						{
-							Name: "xxxCreateWeakKeyPeriodYesIReallyKnowWhatIAmDoingAndDoNotCareAboutThisKeyMaterialFallingIntoTheWrongHandsExclamationPointExclamationPointExclamationPointExclamationPointIAmAMasochistExclamationPointExclamationPointExclamationPointExclamationPointExclamationPoint",
-							Usage: format(`
-                               For testing purposes ONLY! DO NOT USE FOR ANY OTHER PURPOSE!
-
-                               Creates a key with weak key-derivation-function parameters, so that it can be
-                               decrypted quickly during tests. As a result, it would be cheap to brute-force
-                               the encryption password for the key, if the ciphertext fell into the wrong
-                               hands!`),
-							Flags:  append(flags("password, p"), flags("file, f")...),
-							Action: client.CreateAndExportWeakVRFKey,
-							Hidden: !client.Config.Dev(), // For when this suite gets promoted out of dev mode
-						},
 					},
 				},
 			},
@@ -507,12 +498,6 @@ func NewApp(client *Client) *cli.App {
 					Usage:       "Erase the *local node's* user and corresponding session to force recreation on next node launch.",
 					Description: "Does not work remotely over API.",
 					Action:      client.DeleteUser,
-				},
-				{
-					Name:    "import",
-					Aliases: []string{"i"},
-					Usage:   "Import a key file to use with the node",
-					Action:  client.ImportKey,
 				},
 				{
 					Name:   "setnextnonce",
@@ -578,6 +563,10 @@ func NewApp(client *Client) *cli.App {
 							Name:  "address, a",
 							Usage: "The address (in hex format) for the key which we want to rebroadcast transactions",
 						},
+						cli.StringFlag{
+							Name:  "evmChainID",
+							Usage: "Chain ID for which to rebroadcast transactions. If left blank, ETH_CHAIN_ID will be used.",
+						},
 						cli.Uint64Flag{
 							Name:  "gasLimit",
 							Usage: "OPTIONAL: gas limit to use for each transaction ",
@@ -621,10 +610,34 @@ func NewApp(client *Client) *cli.App {
 							Flags:  []cli.Flag{},
 						},
 						{
+							Name:   "status",
+							Usage:  "Display the current database migration status.",
+							Action: client.StatusDatabase,
+							Flags:  []cli.Flag{},
+						},
+						{
 							Name:   "migrate",
 							Usage:  "Migrate the database to the latest version.",
 							Action: client.MigrateDatabase,
 							Flags:  []cli.Flag{},
+						},
+						{
+							Name:   "rollback",
+							Usage:  "Roll back the database to a previous <version>. Rolls back a single migration if no version specified.",
+							Action: client.RollbackDatabase,
+							Flags:  []cli.Flag{},
+						},
+						{
+							Name:   "create-migration",
+							Usage:  "Create a new migration.",
+							Hidden: !client.Config.Dev(),
+							Action: client.CreateMigration,
+							Flags: []cli.Flag{
+								cli.StringFlag{
+									Name:  "type",
+									Usage: "set to `go` to generate a .go migration (instead of .sql)",
+								},
+							},
 						},
 					},
 				},
@@ -678,6 +691,54 @@ func NewApp(client *Client) *cli.App {
 					Name:   "show",
 					Usage:  "get information on a specific Ethereum Transaction",
 					Action: client.ShowTransaction,
+				},
+			},
+		},
+		{
+			Name:  "chains",
+			Usage: "Commands for handling chain configuration",
+			Subcommands: cli.Commands{
+				{
+					Name:  "evm",
+					Usage: "Commands for handling EVM chains",
+					Subcommands: cli.Commands{
+						{
+							Name:   "create",
+							Usage:  "Create a new EVM chain",
+							Action: client.CreateChain,
+						},
+						{
+							Name:   "delete",
+							Usage:  "Delete an EVM chain",
+							Action: client.RemoveChain,
+						},
+						{
+							Name:   "list",
+							Usage:  "List all chains",
+							Action: client.IndexChains,
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:  "nodes",
+			Usage: "Commands for handling node configuration",
+			Subcommands: cli.Commands{
+				{
+					Name:   "create",
+					Usage:  "Create a new node",
+					Action: client.CreateNode,
+				},
+				{
+					Name:   "delete",
+					Usage:  "Delete a node",
+					Action: client.RemoveNode,
+				},
+				{
+					Name:   "list",
+					Usage:  "List all nodes",
+					Action: client.IndexNodes,
 				},
 			},
 		},

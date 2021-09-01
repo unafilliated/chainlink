@@ -19,39 +19,31 @@ type EthKeyPresenter struct {
 }
 
 func (p *EthKeyPresenter) ToRow() []string {
-	nextNonce := fmt.Sprintf("%d", p.NextNonce)
-	var deletedAt string
-	if p.DeletedAt != nil {
-		deletedAt = p.DeletedAt.String()
-	}
-
 	return []string{
 		p.Address,
 		p.EthBalance.String(),
 		p.LinkBalance.String(),
-		nextNonce,
 		fmt.Sprintf("%v", p.IsFunding),
 		p.CreatedAt.String(),
 		p.UpdatedAt.String(),
-		deletedAt,
 	}
 }
 
 // RenderTable implements TableRenderer
 func (p *EthKeyPresenter) RenderTable(rt RendererTable) error {
-	headers := []string{"Address", "ETH", "LINK", "Next nonce", "Is funding", "Created", "Updated", "Deleted"}
+	headers := []string{"Address", "ETH", "LINK", "Is funding", "Created", "Updated"}
 	rows := [][]string{p.ToRow()}
 
 	renderList(headers, rows, rt.Writer)
-	return nil
 
+	return utils.JustError(rt.Write([]byte("\n")))
 }
 
 type EthKeyPresenters []EthKeyPresenter
 
 // RenderTable implements TableRenderer
 func (ps EthKeyPresenters) RenderTable(rt RendererTable) error {
-	headers := []string{"Address", "ETH", "LINK", "Next nonce", "Is funding", "Created", "Updated", "Deleted"}
+	headers := []string{"Address", "ETH", "LINK", "Is funding", "Created", "Updated"}
 	rows := [][]string{}
 
 	for _, p := range ps {
@@ -80,6 +72,7 @@ func (cli *Client) ListETHKeys(c *cli.Context) (err error) {
 
 // CreateETHKey creates a new ethereum key with the same password
 // as the one used to unlock the existing key.
+// FIXME: Add support for specifying evmChainID - https://app.clubhouse.io/chainlinklabs/story/16148/fix-up-cli-to-allow-specifying-evmchainid-when-creating-importing-eth-keys
 func (cli *Client) CreateETHKey(c *cli.Context) (err error) {
 	resp, err := cli.HTTP.Post("/v2/keys/eth", nil)
 	if err != nil {
@@ -130,6 +123,7 @@ func (cli *Client) DeleteETHKey(c *cli.Context) (err error) {
 
 // ImportETHKey imports an Ethereum key,
 // file path must be passed
+// FIXME: Add support for specifying evmChainID - https://app.clubhouse.io/chainlinklabs/story/16148/fix-up-cli-to-allow-specifying-evmchainid-when-creating-importing-eth-keys
 func (cli *Client) ImportETHKey(c *cli.Context) (err error) {
 	if !c.Args().Present() {
 		return cli.errorOut(errors.New("Must pass the filepath of the key to be imported"))

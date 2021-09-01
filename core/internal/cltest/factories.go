@@ -2,7 +2,6 @@ package cltest
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -14,19 +13,16 @@ import (
 	"testing"
 	"time"
 
-	geth_keystore "github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
-	googleuuid "github.com/google/uuid"
 	"github.com/lib/pq"
 	p2ppeer "github.com/libp2p/go-libp2p-core/peer"
 	uuid "github.com/satori/go.uuid"
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/auth"
+	evmconfig "github.com/smartcontractkit/chainlink/core/chains/evm/config"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/flux_aggregator_wrapper"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
 	"github.com/smartcontractkit/chainlink/core/services/job"
@@ -43,7 +39,6 @@ import (
 	"github.com/tidwall/sjson"
 	"github.com/urfave/cli"
 	"gopkg.in/guregu/null.v4"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -182,7 +177,7 @@ func StringToVersionedLogData20190207withoutIndexes(
 	requestID := hexutil.MustDecode(StringToHash(internalID).Hex())
 	buf.Write(requestID)
 
-	payment := hexutil.MustDecode(configtest.MinimumContractPayment.ToHash().Hex())
+	payment := hexutil.MustDecode(evmconfig.DefaultMinimumContractPayment.ToHash().Hex())
 	buf.Write(payment)
 
 	callbackAddr := utils.EVMWordUint64(0)
@@ -424,78 +419,85 @@ func MustInsertFatalErrorEthTx(t *testing.T, db *gorm.DB, fromAddress common.Add
 	return etx
 }
 
-func MustAddRandomKeyToKeystore(t testing.TB, ethKeyStore *keystore.Eth, opts ...interface{}) (ethkey.Key, common.Address) {
+func MustAddRandomKeyToKeystore(t testing.TB, ethKeyStore keystore.Eth) (ethkey.KeyV2, common.Address) {
 	t.Helper()
 
-	k := MustGenerateRandomKey(t, opts...)
-	MustAddKeyToKeystore(t, &k, ethKeyStore)
+	k := MustGenerateRandomKey(t)
+	MustAddKeyToKeystore(t, k, &FixtureChainID, ethKeyStore)
 
 	return k, k.Address.Address()
 }
 
-func MustAddKeyToKeystore(t testing.TB, key *ethkey.Key, ethKeyStore *keystore.Eth) {
+func MustAddKeyToKeystore(t testing.TB, key ethkey.KeyV2, chainID *big.Int, ethKeyStore keystore.Eth) {
 	t.Helper()
-
-	err := ethKeyStore.Unlock(Password)
-	require.NoError(t, err)
-	err = ethKeyStore.AddKey(key)
+	err := ethKeyStore.Add(key, chainID)
 	require.NoError(t, err)
 }
 
 // MustInsertRandomKey inserts a randomly generated (not cryptographically
 // secure) key for testing
 // If using this with the keystore, it should be called before the keystore loads keys from the database
-func MustInsertRandomKey(t testing.TB, db *gorm.DB, opts ...interface{}) ethkey.Key {
+func MustInsertRandomKey(
+	t testing.TB,
+	keystore keystore.Eth,
+	opts ...interface{},
+) (ethkey.KeyV2, common.Address) {
 	t.Helper()
 
-	key := MustGenerateRandomKey(t, opts...)
-
-	require.NoError(t, db.Create(&key).Error)
-	return key
-}
-
-func MustGenerateRandomKey(t testing.TB, opts ...interface{}) ethkey.Key {
-	privateKeyECDSA, err := ecdsa.GenerateKey(crypto.S256(), rand.Reader)
-	require.NoError(t, err)
-	//  < Geth 1.10 id type []byte
-	//  >= Geth 1.10 id type [16]byte
-	id := googleuuid.New()
-	k := &geth_keystore.Key{
-		Id:         id,
-		Address:    crypto.PubkeyToAddress(privateKeyECDSA.PublicKey),
-		PrivateKey: privateKeyECDSA,
+	chainID := *utils.NewBig(&FixtureChainID)
+	for _, opt := range opts {
+		switch v := opt.(type) {
+		case utils.Big:
+			chainID = v
+		}
 	}
-	keyjsonbytes, err := geth_keystore.EncryptKey(k, Password, utils.FastScryptParams.N, utils.FastScryptParams.P)
-	require.NoError(t, err)
-	eip := ethkey.EIP55AddressFromAddress(k.Address)
+
+	key := MustGenerateRandomKey(t)
+	require.NoError(t, keystore.Add(key, chainID.ToInt()))
+	state, err := keystore.GetState(key.ID())
 	require.NoError(t, err)
 
-	var nextNonce int64
-	var funding bool
 	for _, opt := range opts {
 		switch v := opt.(type) {
 		case int:
-			nextNonce = int64(v)
+			state.NextNonce = int64(v)
 		case int64:
-			nextNonce = v
+			state.NextNonce = v
 		case bool:
-			funding = v
+			state.IsFunding = v
+		case utils.Big:
+			state.EVMChainID = v
 		default:
 			t.Fatalf("unrecognised option type: %T", v)
 		}
 	}
+	err = keystore.SetState(state)
+	require.NoError(t, err)
 
-	key := ethkey.Key{
-		Address:   eip,
-		JSON:      datatypes.JSON(keyjsonbytes),
-		NextNonce: nextNonce,
-		IsFunding: funding,
-	}
+	return key, key.Address.Address()
+}
+
+func MustInsertRandomKeyReturningState(t testing.TB,
+	keystore keystore.Eth,
+	opts ...interface{},
+) (ethkey.State, common.Address) {
+	k, address := MustInsertRandomKey(t, keystore, opts...)
+	state := MustGetStateForKey(t, keystore, k)
+	return state, address
+}
+
+func MustGenerateRandomKey(t testing.TB) ethkey.KeyV2 {
+	key, err := ethkey.NewV2()
+	require.NoError(t, err)
 	return key
 }
 
+func MustGenerateRandomKeyState(t testing.TB) ethkey.State {
+	return ethkey.State{Address: NewEIP55Address()}
+}
+
 func MustInsertHead(t *testing.T, store *strpkg.Store, number int64) models.Head {
-	h := models.NewHead(big.NewInt(number), utils.NewHash(), utils.NewHash(), 0)
+	h := models.NewHead(big.NewInt(number), utils.NewHash(), utils.NewHash(), 0, utils.NewBig(&FixtureChainID))
 	err := store.DB.Create(&h).Error
 	require.NoError(t, err)
 	return h
@@ -536,7 +538,7 @@ func MustInsertOffchainreportingOracleSpec(t *testing.T, db *gorm.DB, transmitte
 		P2PPeerID:                              &pid,
 		P2PBootstrapPeers:                      pq.StringArray{},
 		IsBootstrapPeer:                        false,
-		EncryptedOCRKeyBundleID:                &DefaultOCRKeyBundleIDSha256,
+		EncryptedOCRKeyBundleID:                null.NewString(DefaultOCRKeyBundleID, true),
 		TransmitterAddress:                     &transmitterAddress,
 		ObservationTimeout:                     0,
 		BlockchainTimeout:                      0,
@@ -562,16 +564,16 @@ func MakeDirectRequestJobSpec(t *testing.T) *job.Job {
 	return spec
 }
 
-func MustInsertKeeperJob(t *testing.T, store *strpkg.Store, from ethkey.EIP55Address, contract ethkey.EIP55Address) job.Job {
+func MustInsertKeeperJob(t *testing.T, db *gorm.DB, from ethkey.EIP55Address, contract ethkey.EIP55Address) job.Job {
 	t.Helper()
 	pipelineSpec := pipeline.Spec{}
-	err := store.DB.Create(&pipelineSpec).Error
+	err := db.Create(&pipelineSpec).Error
 	require.NoError(t, err)
 	keeperSpec := job.KeeperSpec{
 		ContractAddress: contract,
 		FromAddress:     from,
 	}
-	err = store.DB.Create(&keeperSpec).Error
+	err = db.Create(&keeperSpec).Error
 	require.NoError(t, err)
 	specDB := job.Job{
 		KeeperSpec:     &keeperSpec,
@@ -582,17 +584,17 @@ func MustInsertKeeperJob(t *testing.T, store *strpkg.Store, from ethkey.EIP55Add
 		PipelineSpec:   &pipelineSpec,
 		PipelineSpecID: pipelineSpec.ID,
 	}
-	err = store.DB.Create(&specDB).Error
+	err = db.Create(&specDB).Error
 	require.NoError(t, err)
 	return specDB
 }
 
-func MustInsertKeeperRegistry(t *testing.T, store *strpkg.Store, ethKeyStore *keystore.Eth) (keeper.Registry, job.Job) {
+func MustInsertKeeperRegistry(t *testing.T, db *gorm.DB, ethKeyStore keystore.Eth) (keeper.Registry, job.Job) {
 	key, _ := MustAddRandomKeyToKeystore(t, ethKeyStore)
 	from := key.Address
 	t.Helper()
 	contractAddress := NewEIP55Address()
-	job := MustInsertKeeperJob(t, store, from, contractAddress)
+	job := MustInsertKeeperJob(t, db, from, contractAddress)
 	registry := keeper.Registry{
 		ContractAddress:   contractAddress,
 		BlockCountPerTurn: 20,
@@ -602,14 +604,14 @@ func MustInsertKeeperRegistry(t *testing.T, store *strpkg.Store, ethKeyStore *ke
 		KeeperIndex:       0,
 		NumKeepers:        1,
 	}
-	err := store.DB.Create(&registry).Error
+	err := db.Create(&registry).Error
 	require.NoError(t, err)
 	return registry, job
 }
 
-func MustInsertUpkeepForRegistry(t *testing.T, store *strpkg.Store, registry keeper.Registry) keeper.UpkeepRegistration {
+func MustInsertUpkeepForRegistry(t *testing.T, db *gorm.DB, cfg keeper.Config, registry keeper.Registry) keeper.UpkeepRegistration {
 	ctx, _ := postgres.DefaultQueryCtx()
-	upkeepID, err := keeper.NewORM(store.DB, nil, store.Config, bulletprooftxmanager.SendEveryStrategy{}).LowestUnsyncedID(ctx, registry.ID)
+	upkeepID, err := keeper.NewORM(db, nil, cfg, bulletprooftxmanager.SendEveryStrategy{}).LowestUnsyncedID(ctx, registry.ID)
 	require.NoError(t, err)
 	upkeep := keeper.UpkeepRegistration{
 		UpkeepID:   upkeepID,
@@ -621,7 +623,7 @@ func MustInsertUpkeepForRegistry(t *testing.T, store *strpkg.Store, registry kee
 	positioningConstant, err := keeper.CalcPositioningConstant(upkeepID, registry.ContractAddress)
 	require.NoError(t, err)
 	upkeep.PositioningConstant = positioningConstant
-	err = store.DB.Create(&upkeep).Error
+	err = db.Create(&upkeep).Error
 	require.NoError(t, err)
 	return upkeep
 }
@@ -631,8 +633,8 @@ func NewRoundStateForRoundID(store *strpkg.Store, roundID uint32, latestSubmissi
 		RoundId:          roundID,
 		EligibleToSubmit: true,
 		LatestSubmission: latestSubmission,
-		AvailableFunds:   configtest.MinimumContractPayment.ToInt(),
-		PaymentAmount:    configtest.MinimumContractPayment.ToInt(),
+		AvailableFunds:   evmconfig.DefaultMinimumContractPayment.ToInt(),
+		PaymentAmount:    evmconfig.DefaultMinimumContractPayment.ToInt(),
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/smartcontractkit/chainlink/core/chains/evm"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -13,7 +14,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/operator_wrapper"
 	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/eth"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/log"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
@@ -24,13 +24,12 @@ import (
 
 type (
 	Delegate struct {
-		logBroadcaster log.Broadcaster
+		logger         *logger.Logger
 		pipelineRunner pipeline.Runner
 		pipelineORM    pipeline.ORM
 		db             *gorm.DB
-		ethClient      eth.Client
 		chHeads        chan models.Head
-		config         Config
+		chainSet       evm.ChainSet
 	}
 
 	Config interface {
@@ -42,21 +41,19 @@ type (
 var _ job.Delegate = (*Delegate)(nil)
 
 func NewDelegate(
-	logBroadcaster log.Broadcaster,
+	logger *logger.Logger,
 	pipelineRunner pipeline.Runner,
 	pipelineORM pipeline.ORM,
-	ethClient eth.Client,
 	db *gorm.DB,
-	config Config,
+	chainSet evm.ChainSet,
 ) *Delegate {
 	return &Delegate{
-		logBroadcaster,
+		logger,
 		pipelineRunner,
 		pipelineORM,
 		db,
-		ethClient,
 		make(chan models.Head, 1),
-		config,
+		chainSet,
 	}
 }
 
@@ -68,38 +65,55 @@ func (Delegate) AfterJobCreated(spec job.Job)  {}
 func (Delegate) BeforeJobDeleted(spec job.Job) {}
 
 // ServicesForSpec returns the log listener service for a direct request job
-func (d *Delegate) ServicesForSpec(job job.Job) (services []job.Service, err error) {
-	if job.DirectRequestSpec == nil {
-		return nil, errors.Errorf("directrequest.Delegate expects a *job.DirectRequestSpec to be present, got %v", job)
+func (d *Delegate) ServicesForSpec(jb job.Job) ([]job.Service, error) {
+	if jb.DirectRequestSpec == nil {
+		return nil, errors.Errorf("DirectRequest: directrequest.Delegate expects a *job.DirectRequestSpec to be present, got %v", jb)
 	}
-	concreteSpec := job.DirectRequestSpec
-
-	oracle, err := operator_wrapper.NewOperator(concreteSpec.ContractAddress.Address(), d.ethClient)
+	concreteSpec := jb.DirectRequestSpec
+	chain, err := d.chainSet.Get(jb.DirectRequestSpec.EVMChainID.ToInt())
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	minIncomingConfirmations := d.config.MinIncomingConfirmations()
+	oracle, err := operator_wrapper.NewOperator(concreteSpec.ContractAddress.Address(), chain.Client())
+	if err != nil {
+		return nil, errors.Wrapf(err, "DirectRequest: failed to create an operator wrapper for address: %v", concreteSpec.ContractAddress.Address().String())
+	}
+
+	minIncomingConfirmations := chain.Config().MinIncomingConfirmations()
 
 	if concreteSpec.MinIncomingConfirmations.Uint32 > minIncomingConfirmations {
 		minIncomingConfirmations = concreteSpec.MinIncomingConfirmations.Uint32
 	}
 
+	svcLogger := d.logger.
+		Named("DirectRequest").
+		With(
+			"contract", concreteSpec.ContractAddress.Address().String(),
+			"jobName", jb.PipelineSpec.JobName,
+			"jobID", jb.PipelineSpec.JobID,
+			"externalJobID", jb.ExternalJobID,
+		)
+
 	logListener := &listener{
-		config:                   d.config,
-		logBroadcaster:           d.logBroadcaster,
+		logger:                   svcLogger,
+		config:                   chain.Config(),
+		logBroadcaster:           chain.LogBroadcaster(),
 		oracle:                   oracle,
 		pipelineRunner:           d.pipelineRunner,
 		db:                       d.db,
 		pipelineORM:              d.pipelineORM,
-		job:                      job,
+		job:                      jb,
 		mbLogs:                   utils.NewMailbox(50),
 		minIncomingConfirmations: uint64(minIncomingConfirmations),
+		requesters:               concreteSpec.Requesters,
+		minContractPayment:       concreteSpec.MinContractPayment,
 		chStop:                   make(chan struct{}),
 	}
+	var services []job.Service
 	services = append(services, logListener)
 
-	return
+	return services, nil
 }
 
 var (
@@ -108,6 +122,7 @@ var (
 )
 
 type listener struct {
+	logger                   *logger.Logger
 	config                   Config
 	logBroadcaster           log.Broadcaster
 	oracle                   operator_wrapper.OperatorInterface
@@ -119,6 +134,8 @@ type listener struct {
 	shutdownWaitGroup        sync.WaitGroup
 	mbLogs                   *utils.Mailbox
 	minIncomingConfirmations uint64
+	requesters               models.AddressCollection
+	minContractPayment       *assets.Link
 	chStop                   chan struct{}
 	utils.StartStopOnce
 }
@@ -168,7 +185,7 @@ func (l *listener) Close() error {
 func (l *listener) HandleLog(lb log.Broadcast) {
 	wasOverCapacity := l.mbLogs.Deliver(lb)
 	if wasOverCapacity {
-		logger.Error("DirectRequestListener: log mailbox is over capacity - dropped the oldest log")
+		l.logger.Error("DirectRequest: log mailbox is over capacity - dropped the oldest log")
 	}
 }
 
@@ -192,13 +209,13 @@ func (l *listener) handleReceivedLogs() {
 		}
 		lb, ok := i.(log.Broadcast)
 		if !ok {
-			panic(errors.Errorf("DirectRequestListener: invariant violation, expected log.Broadcast but got %T", lb))
+			panic(errors.Errorf("DirectRequest: invariant violation, expected log.Broadcast but got %T", lb))
 		}
 		ctx, cancel := postgres.DefaultQueryCtx()
 		was, err := l.logBroadcaster.WasAlreadyConsumed(l.db.WithContext(ctx), lb)
 		cancel()
 		if err != nil {
-			logger.Errorw("DirectRequestListener: could not determine if log was already consumed", "error", err)
+			l.logger.Errorw("DirectRequest: could not determine if log was already consumed", "error", err)
 			return
 		} else if was {
 			return
@@ -206,13 +223,13 @@ func (l *listener) handleReceivedLogs() {
 
 		logJobSpecID := lb.RawLog().Topics[1]
 		if logJobSpecID == (common.Hash{}) || (logJobSpecID != l.job.ExternalIDEncodeStringToTopic() && logJobSpecID != l.job.ExternalIDEncodeBytesToTopic()) {
-			logger.Debugw("DirectRequestListener: Skipping Run for Log with wrong Job ID", "logJobSpecID", logJobSpecID, "actualJobID", l.job.ExternalJobID)
+			l.logger.Debugw("DirectRequest: Skipping Run for Log with wrong Job ID", "logJobSpecID", logJobSpecID)
 			return
 		}
 
 		log := lb.DecodedLog()
 		if log == nil || reflect.ValueOf(log).IsNil() {
-			logger.Error("DirectRequestListener: HandleLog: ignoring nil value")
+			l.logger.Error("DirectRequest: HandleLog: ignoring nil value")
 			return
 		}
 
@@ -222,7 +239,7 @@ func (l *listener) handleReceivedLogs() {
 		case *operator_wrapper.OperatorCancelOracleRequest:
 			l.handleCancelOracleRequest(log, lb)
 		default:
-			logger.Warnf("unexpected log type %T", log)
+			l.logger.Warnf("DirectRequest: unexpected log type %T", log)
 		}
 	}
 }
@@ -242,7 +259,7 @@ func oracleRequestToMap(request *operator_wrapper.OperatorOracleRequest) map[str
 }
 
 func (l *listener) handleOracleRequest(request *operator_wrapper.OperatorOracleRequest, lb log.Broadcast) {
-	logger.Infow("Direct request: oracle request received",
+	logger.Infow("DirectRequest: oracle request received",
 		"specId", fmt.Sprintf("%0x", request.SpecId),
 		"requester", request.Requester,
 		"requestId", fmt.Sprintf("%0x", request.RequestId),
@@ -254,18 +271,36 @@ func (l *listener) handleOracleRequest(request *operator_wrapper.OperatorOracleR
 		"data", fmt.Sprintf("%0x", request.Data),
 	)
 
-	minimumContractPayment := l.config.MinimumContractPayment()
-	if minimumContractPayment != nil {
+	if !l.allowRequester(request.Requester) {
+		l.logger.Infow("DirectRequest: Rejected run for invalid requester",
+			"requester", request.Requester,
+			"allowedRequesters", l.requesters.ToStrings(),
+		)
+		ctx, cancel := postgres.DefaultQueryCtx()
+		defer cancel()
+		if err := l.logBroadcaster.MarkConsumed(l.db.WithContext(ctx), lb); err != nil {
+			l.logger.Errorw("DirectRequest: unable to mark log consumed", "err", err, "log", lb.String())
+		}
+		return
+	}
+
+	var minContractPayment *assets.Link
+	if l.minContractPayment != nil {
+		minContractPayment = l.minContractPayment
+	} else {
+		minContractPayment = l.config.MinimumContractPayment()
+	}
+	if minContractPayment != nil && request.Payment != nil {
 		requestPayment := assets.Link(*request.Payment)
-		if minimumContractPayment.Cmp(&requestPayment) > 0 {
-			logger.Infow("Rejected run for insufficient payment",
-				"minimumContractPayment", minimumContractPayment.String(),
+		if minContractPayment.Cmp(&requestPayment) > 0 {
+			l.logger.Warnw("DirectRequest: Rejected run for insufficient payment",
+				"minContractPayment", minContractPayment.String(),
 				"requestPayment", requestPayment.String(),
 			)
 			ctx, cancel := postgres.DefaultQueryCtx()
 			defer cancel()
 			if err := l.logBroadcaster.MarkConsumed(l.db.WithContext(ctx), lb); err != nil {
-				logger.Errorw("DirectRequest: unable to mark log consumed", "err", err, "log", lb.String())
+				l.logger.Errorw("DirectRequest: unable to mark log consumed", "err", err, "log", lb.String())
 			}
 			return
 		}
@@ -273,11 +308,6 @@ func (l *listener) handleOracleRequest(request *operator_wrapper.OperatorOracleR
 
 	meta := make(map[string]interface{})
 	meta["oracleRequest"] = oracleRequestToMap(request)
-
-	logger := logger.Default.With(
-		"jobName", l.job.PipelineSpec.JobName,
-		"jobID", l.job.PipelineSpec.JobID,
-	)
 
 	l.shutdownWaitGroup.Add(1)
 	go func() {
@@ -308,18 +338,30 @@ func (l *listener) handleOracleRequest(request *operator_wrapper.OperatorOracleR
 			},
 		})
 		run := pipeline.NewRun(*l.job.PipelineSpec, vars)
-		_, err := l.pipelineRunner.Run(ctx, &run, *logger, true, func(tx *gorm.DB) error {
+		_, err := l.pipelineRunner.Run(ctx, &run, *l.logger, true, func(tx *gorm.DB) error {
 			if err := l.logBroadcaster.MarkConsumed(tx, lb); err != nil {
-				logger.Errorw("DirectRequest: failed mark consumed", "err", err)
+				l.logger.Errorw("DirectRequest: failed mark consumed", "err", err)
 			}
 			return nil
 		})
 		if ctx.Err() != nil {
 			return
 		} else if err != nil {
-			logger.Errorw("DirectRequest: failed executing run", "err", err)
+			l.logger.Errorw("DirectRequest: failed executing run", "err", err)
 		}
 	}()
+}
+
+func (l *listener) allowRequester(requester common.Address) bool {
+	if len(l.requesters) == 0 {
+		return true
+	}
+	for _, addr := range l.requesters {
+		if addr == requester {
+			return true
+		}
+	}
+	return false
 }
 
 // Cancels runs that haven't been started yet, with the given request ID
@@ -331,7 +373,7 @@ func (l *listener) handleCancelOracleRequest(request *operator_wrapper.OperatorC
 	ctx, cancel := postgres.DefaultQueryCtx()
 	defer cancel()
 	if err := l.logBroadcaster.MarkConsumed(l.db.WithContext(ctx), lb); err != nil {
-		logger.Errorw("DirectRequest: failed to mark log consumed", "log", lb.String())
+		l.logger.Errorw("DirectRequest: failed to mark log consumed", "log", lb.String())
 	}
 }
 

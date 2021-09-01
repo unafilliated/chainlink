@@ -5,17 +5,23 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/smartcontractkit/chainlink/core/chains/evm"
+	evmconfig "github.com/smartcontractkit/chainlink/core/chains/evm/config"
+	evmmocks "github.com/smartcontractkit/chainlink/core/chains/evm/mocks"
 	"github.com/smartcontractkit/chainlink/core/cmd"
+	"github.com/smartcontractkit/chainlink/core/gracefulpanic"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/core/services/keystore"
+	"github.com/smartcontractkit/chainlink/core/services/eth"
 	"github.com/smartcontractkit/chainlink/core/store"
 	"github.com/smartcontractkit/chainlink/core/store/config"
 	"github.com/smartcontractkit/chainlink/core/store/models"
@@ -137,7 +143,7 @@ type InstanceAppFactory struct {
 }
 
 // NewApplication creates a new application with specified config
-func (f InstanceAppFactory) NewApplication(config config.EVMConfig) (chainlink.Application, error) {
+func (f InstanceAppFactory) NewApplication(config config.GeneralConfig) (chainlink.Application, error) {
 	return f.App, nil
 }
 
@@ -145,7 +151,7 @@ type seededAppFactory struct {
 	Application chainlink.Application
 }
 
-func (s seededAppFactory) NewApplication(config config.EVMConfig) (chainlink.Application, error) {
+func (s seededAppFactory) NewApplication(config config.GeneralConfig) (chainlink.Application, error) {
 	return noopStopApplication{s.Application}, nil
 }
 
@@ -157,30 +163,6 @@ type noopStopApplication struct {
 func (a noopStopApplication) Stop() error {
 	return nil
 }
-
-// CallbackAuthenticator contains a call back authenticator method
-type CallbackAuthenticator struct {
-	Callback func(*keystore.Eth, string) (string, error)
-}
-
-// Authenticate authenticates store and pwd with the callback authenticator
-func (a CallbackAuthenticator) AuthenticateEthKey(ethKeyStore *keystore.Eth, pwd string) (string, error) {
-	return a.Callback(ethKeyStore, pwd)
-}
-
-func (a CallbackAuthenticator) AuthenticateVRFKey(vrfKeyStore *keystore.VRF, pwd string) error {
-	return nil
-}
-
-func (a CallbackAuthenticator) AuthenticateOCRKey(*keystore.OCR, string) error {
-	return nil
-}
-
-func (a CallbackAuthenticator) AuthenticateCSAKey(*keystore.CSA, string) error {
-	return nil
-}
-
-var _ cmd.KeyStoreAuthenticator = CallbackAuthenticator{}
 
 // BlockedRunner is a Runner that blocks until its channel is posted to
 type BlockedRunner struct {
@@ -464,4 +446,32 @@ type MockPasswordPrompter struct {
 
 func (m MockPasswordPrompter) Prompt() string {
 	return m.Password
+}
+
+var _ gracefulpanic.Signal = &testShutdownSignal{}
+
+type testShutdownSignal struct {
+	t testing.TB
+}
+
+func (tss *testShutdownSignal) Panic() {
+	tss.t.Errorf("panic: %s", debug.Stack())
+	panic("panic")
+}
+
+func (tss *testShutdownSignal) Wait() <-chan struct{} {
+	return make(chan struct{})
+}
+
+func NewChainSetMockWithOneChain(t testing.TB, ethClient eth.Client, cfg evmconfig.ChainScopedConfig) evm.ChainSet {
+	cc := new(evmmocks.ChainSet)
+	ch := new(evmmocks.Chain)
+	ch.On("Client").Return(ethClient)
+	ch.On("Config").Return(cfg)
+	ch.On("Logger").Return(logger.Default)
+	ch.On("ID").Return(cfg.ChainID())
+	cc.On("Default").Return(ch, nil)
+	cc.On("Get", (*big.Int)(nil)).Return(ch, nil)
+	cc.On("Chains").Return([]evm.Chain{ch})
+	return cc
 }

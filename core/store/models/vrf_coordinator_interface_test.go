@@ -7,19 +7,19 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/smartcontractkit/chainlink/core/assets"
-	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/vrfkey"
+	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	secretKey = vrfkey.NewPrivateKeyXXXTestingOnly(big.NewInt(1))
+	secretKey = cltest.DefaultVRFKey
 	keyHash   = secretKey.PublicKey.MustHash()
 	jobID     = common.BytesToHash([]byte("1234567890abcdef1234567890abcdef"))
 	seed      = big.NewInt(1)
 	sender    = common.HexToAddress("0xecfcab0a285d3380e488a39b4bb21e777f8a4eac")
-	fee       = assets.NewLink(100)
+	fee       = assets.NewLinkFromJuels(100)
 	requestID = common.HexToHash("0xcafe")
 	raw       = models.RawRandomnessRequestLog{
 		KeyHash:   keyHash,

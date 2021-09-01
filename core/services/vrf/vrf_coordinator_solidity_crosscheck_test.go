@@ -15,13 +15,13 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	evmconfig "github.com/smartcontractkit/chainlink/core/chains/evm/config"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/vrfkey"
 	"github.com/smartcontractkit/chainlink/core/services/signatures/secp256k1"
@@ -71,7 +71,7 @@ func newIdentity(t *testing.T) *bind.TransactOpts {
 	return cltest.MustNewSimulatedBackendKeyedTransactor(t, key)
 }
 
-func newVRFCoordinatorUniverseWithV08Consumer(t *testing.T, key ethkey.Key) coordinatorUniverse {
+func newVRFCoordinatorUniverseWithV08Consumer(t *testing.T, key ethkey.KeyV2) coordinatorUniverse {
 	cu := newVRFCoordinatorUniverse(t, key)
 	consumerContractAddress, _, consumerContract, err :=
 		solidity_vrf_consumer_interface_v08.DeployVRFConsumer(
@@ -91,10 +91,8 @@ func newVRFCoordinatorUniverseWithV08Consumer(t *testing.T, key ethkey.Key) coor
 
 // newVRFCoordinatorUniverse sets up all identities and contracts associated with
 // testing the solidity VRF contracts involved in randomness request workflow
-func newVRFCoordinatorUniverse(t *testing.T, key ethkey.Key) coordinatorUniverse {
-	k, err := keystore.DecryptKey(key.JSON, cltest.Password)
-	require.NoError(t, err)
-	oracleTransactor := cltest.MustNewSimulatedBackendKeyedTransactor(t, k.PrivateKey)
+func newVRFCoordinatorUniverse(t *testing.T, key ethkey.KeyV2) coordinatorUniverse {
+	oracleTransactor := cltest.MustNewSimulatedBackendKeyedTransactor(t, key.ToEcdsaPrivKey())
 	var (
 		sergey  = newIdentity(t)
 		neil    = newIdentity(t)
@@ -116,7 +114,7 @@ func newVRFCoordinatorUniverse(t *testing.T, key ethkey.Key) coordinatorUniverse
 	coordinatorABI, err := abi.JSON(strings.NewReader(
 		solidity_vrf_coordinator_interface.VRFCoordinatorABI))
 	require.NoError(t, err)
-	backend := backends.NewSimulatedBackend(genesisData, gasLimit)
+	backend := cltest.NewSimulatedBackend(t, genesisData, gasLimit)
 	linkAddress, _, linkContract, err := link_token_interface.DeployLinkToken(
 		sergey, backend)
 	require.NoError(t, err, "failed to deploy link contract to simulated ethereum blockchain")
@@ -166,7 +164,7 @@ func TestRequestIDMatches(t *testing.T) {
 
 var (
 	rawSecretKey = big.NewInt(1) // never do this in production!
-	secretKey    = vrfkey.NewPrivateKeyXXXTestingOnly(rawSecretKey)
+	secretKey    = vrfkey.MustNewV2XXXTestingOnly(rawSecretKey)
 	publicKey    = (&secp256k1.Secp256k1{}).Point().Mul(secp256k1.IntToScalar(
 		rawSecretKey), nil)
 	hardcodedSeed = big.NewInt(0)
@@ -313,8 +311,7 @@ func TestRandomnessRequestLog(t *testing.T) {
 }
 
 // fulfillRandomnessRequest is neil fulfilling randomness requested by log.
-func fulfillRandomnessRequest(t *testing.T, coordinator coordinatorUniverse,
-	log models.RandomnessRequestLog) vrfkey.Proof {
+func fulfillRandomnessRequest(t *testing.T, coordinator coordinatorUniverse, log models.RandomnessRequestLog) vrfkey.Proof {
 	preSeed, err := proof2.BigToSeed(log.Seed)
 	require.NoError(t, err, "pre-seed %x out of range", preSeed)
 	s := proof2.PreSeedData{
@@ -333,7 +330,7 @@ func fulfillRandomnessRequest(t *testing.T, coordinator coordinatorUniverse,
 	coordinator.backend.Commit()
 	// This is simulating a node response, so set the gas limit as chainlink does
 	var neil bind.TransactOpts = *coordinator.neil
-	neil.GasLimit = cltest.NewTestEVMConfig(t).EvmGasLimitDefault()
+	neil.GasLimit = evmconfig.DefaultGasLimit
 	_, err = coordinator.rootContract.FulfillRandomnessRequest(&neil, proofBlob[:])
 	require.NoError(t, err, "failed to fulfill randomness request!")
 	coordinator.backend.Commit()

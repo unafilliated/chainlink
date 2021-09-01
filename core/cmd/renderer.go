@@ -98,13 +98,10 @@ func (rt RendererTable) renderVRFKeys(keys []VRFKeyPresenter) error {
 			key.Compressed,
 			key.Uncompressed,
 			key.Hash,
-			key.CreatedAt.String(),
-			key.UpdatedAt.String(),
-			key.FriendlyDeletedAt(),
 		})
 	}
 
-	renderList([]string{"Compressed", "Uncompressed", "Hash", "Created", "Updated", "Deleted"}, rows, rt.Writer)
+	renderList([]string{"Compressed", "Uncompressed", "Hash"}, rows, rt.Writer)
 
 	return nil
 }
@@ -171,8 +168,10 @@ func renderList(fields []string, items [][]string, writer io.Writer) {
 			diff := maxLabelLength - len(field)
 			spaces := strings.Repeat(" ", diff)
 			line := fmt.Sprintf("%v: %v%v", field, spaces, row[i])
-			if len(line) > maxLineLength {
-				maxLineLength = len(line)
+			for _, l := range strings.Split(line, "\n") {
+				if len(l) > maxLineLength {
+					maxLineLength = len(l)
+				}
 			}
 			lines = append(lines, line)
 		}

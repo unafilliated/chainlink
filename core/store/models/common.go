@@ -19,6 +19,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/robfig/cron/v3"
 	"github.com/smartcontractkit/chainlink/core/assets"
+	"github.com/smartcontractkit/chainlink/core/utils"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -380,7 +381,7 @@ func (c *Cron) UnmarshalJSON(b []byte) error {
 	var s string
 	err := json.Unmarshal(b, &s)
 	if err != nil {
-		return fmt.Errorf("Cron: %v", err)
+		return fmt.Errorf("Cron: %w", err)
 	}
 	if s == "" {
 		return nil
@@ -392,7 +393,7 @@ func (c *Cron) UnmarshalJSON(b []byte) error {
 
 	_, err = CronParser.Parse(s)
 	if err != nil {
-		return fmt.Errorf("Cron: %v", err)
+		return fmt.Errorf("Cron: %w", err)
 	}
 	*c = Cron(s)
 	return nil
@@ -486,6 +487,10 @@ func (d Duration) Value() (driver.Value, error) {
 // Interval represents a time.Duration stored as a Postgres interval type
 type Interval time.Duration
 
+func (i Interval) Duration() time.Duration {
+	return time.Duration(i)
+}
+
 // MarshalText implements the text.Marshaler interface.
 func (i Interval) MarshalText() ([]byte, error) {
 	return []byte(time.Duration(i).String()), nil
@@ -534,6 +539,7 @@ type SendEtherRequest struct {
 	DestinationAddress common.Address `json:"address"`
 	FromAddress        common.Address `json:"from"`
 	Amount             assets.Eth     `json:"amount"`
+	EVMChainID         *utils.Big     `json:"evmChainID"`
 }
 
 // AddressCollection is an array of common.Address

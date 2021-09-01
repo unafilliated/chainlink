@@ -28,6 +28,11 @@ type JobsController struct {
 // Example:
 // "GET <application>/jobs"
 func (jc *JobsController) Index(c *gin.Context, size, page, offset int) {
+	// Temporary: if no size is passed in, use a large page size. Remove once frontend can handle pagination
+	if c.Query("size") == "" {
+		size = 1000
+	}
+
 	jobs, count, err := jc.App.JobORM().JobsV2(offset, size)
 	if err != nil {
 		jsonAPIError(c, http.StatusInternalServerError, err)
@@ -90,7 +95,7 @@ func (jc *JobsController) Create(c *gin.Context) {
 	config := jc.App.GetStore().Config
 	switch jobType {
 	case job.OffchainReporting:
-		jb, err = offchainreporting.ValidatedOracleSpecToml(jc.App.GetEVMConfig(), request.TOML)
+		jb, err = offchainreporting.ValidatedOracleSpecToml(jc.App.GetChainSet(), request.TOML)
 		if !config.Dev() && !config.FeatureOffchainReporting() {
 			jsonAPIError(c, http.StatusNotImplemented, errors.New("The Offchain Reporting feature is disabled by configuration"))
 			return

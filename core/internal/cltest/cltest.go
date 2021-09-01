@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -38,6 +36,9 @@ import (
 	"github.com/onsi/gomega"
 	uuid "github.com/satori/go.uuid"
 	"github.com/smartcontractkit/chainlink/core/auth"
+	"github.com/smartcontractkit/chainlink/core/chains/evm"
+	evmconfig "github.com/smartcontractkit/chainlink/core/chains/evm/config"
+	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/core/cmd"
 	"github.com/smartcontractkit/chainlink/core/gracefulpanic"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/flux_aggregator_wrapper"
@@ -50,8 +51,11 @@ import (
 	httypes "github.com/smartcontractkit/chainlink/core/services/headtracker/types"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/keystore"
+	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/csakey"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
+	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ocrkey"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/p2pkey"
+	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/vrfkey"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/services/webhook"
@@ -73,6 +77,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
+
 	// Force import of pgtest to ensure that txdb is registered as a DB driver
 	_ "github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 )
@@ -89,18 +95,18 @@ const (
 	VRFPassword = "testingpassword"
 	// SessionSecret is the hardcoded secret solely used for test
 	SessionSecret = "clsession_test_secret"
-	// DefaultKeyAddress is the ETH address of the fixture key
-	DefaultKeyAddress = "0xF67D0290337bca0847005C7ffD1BC75BA9AAE6e4"
 	// DefaultKeyFixtureFileName is the filename of the fixture key
 	DefaultKeyFixtureFileName = "testkey-0xF67D0290337bca0847005C7ffD1BC75BA9AAE6e4.json"
 	// DefaultKeyJSON is the JSON for the default key encrypted with fast scrypt and password 'password' (used for fixture file)
 	DefaultKeyJSON = `{"address":"F67D0290337bca0847005C7ffD1BC75BA9AAE6e4","crypto":{"cipher":"aes-128-ctr","ciphertext":"9c3565050ba4e10ea388bcd17d77c141441ce1be5db339f0201b9ed733d780c6","cipherparams":{"iv":"f968fc947495646ee8b5dbaadb242ec0"},"kdf":"scrypt","kdfparams":{"dklen":32,"n":262144,"p":1,"r":8,"salt":"33ad88742a983dfeb8adcc9a39fdde4cb47f7e23ea2ef80b35723d940959e3fd"},"mac":"b3747959cbbb9b26f861ab82d69154b4ec8108bbac017c1341f6fd3295beceaf"},"id":"8c79a654-96b1-45d9-8978-3efa07578011","version":3}`
 	// AllowUnstarted enable an application that can be used in tests without being started
 	AllowUnstarted = "allow_unstarted"
+	// DefaultPeerID is the peer ID of the default p2p key
+	DefaultPeerID = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X"
 	// A peer ID without an associated p2p key.
 	NonExistentPeerID = "12D3KooWAdCzaesXyezatDzgGvCngqsBqoUqnV9PnVc46jsVt2i9"
-	// DefaultOCRKeyBundleID is the ID of the fixture ocr key bundle
-	DefaultOCRKeyBundleID = "7f993fb701b3410b1f6e8d4d93a7462754d24609b9b31a4fe64a0cb475a4d934"
+	// DefaultOCRKeyBundleID is the ID of the default ocr key bundle
+	DefaultOCRKeyBundleID = "b609c2e0e042cdb788de5234017a49103b489e6a9f94cb45ec3d34e1fe1a0f5f"
 )
 
 var (
@@ -109,7 +115,13 @@ var (
 	// DefaultOCRKeyBundleIDSha256 is the ID of the fixture ocr key bundle
 	DefaultOCRKeyBundleIDSha256 models.Sha256Hash
 	FluxAggAddress              = common.HexToAddress("0x3cCad4715152693fE3BC4460591e3D3Fbd071b42")
+	FixtureChainID              = *big.NewInt(0)
 	source                      rand.Source
+
+	DefaultCSAKey = csakey.MustNewV2XXXTestingOnly(big.NewInt(1))
+	DefaultOCRKey = ocrkey.MustNewV2XXXTestingOnly(big.NewInt(1))
+	DefaultP2PKey = p2pkey.MustNewV2XXXTestingOnly(big.NewInt(1))
+	DefaultVRFKey = vrfkey.MustNewV2XXXTestingOnly(big.NewInt(1))
 )
 
 func init() {
@@ -184,11 +196,11 @@ type JobPipelineV2TestHelper struct {
 	Pr  pipeline.Runner
 }
 
-func NewJobPipelineV2(t testing.TB, cfg config.EVMConfig, db *gorm.DB, ethClient eth.Client, keyStore pipeline.ETHKeyStore, txManager pipeline.TxManager) JobPipelineV2TestHelper {
+func NewJobPipelineV2(t testing.TB, cfg config.GeneralConfig, cc evm.ChainSet, db *gorm.DB, keyStore keystore.Master) JobPipelineV2TestHelper {
 	prm, eb, cleanup := NewPipelineORM(t, cfg, db)
-	jrm := job.NewORM(db, cfg, prm, eb, &postgres.NullAdvisoryLocker{})
+	jrm := job.NewORM(db, cc, prm, eb, &postgres.NullAdvisoryLocker{}, keyStore)
 	t.Cleanup(cleanup)
-	pr := pipeline.NewRunner(prm, cfg, ethClient, keyStore, nil, txManager)
+	pr := pipeline.NewRunner(prm, cfg, cc, keyStore.Eth(), keyStore.VRF())
 	return JobPipelineV2TestHelper{
 		prm,
 		eb,
@@ -207,19 +219,19 @@ func NewPipelineORM(t testing.TB, cfg config.GeneralConfig, db *gorm.DB) (pipeli
 	}
 }
 
-func NewEthBroadcaster(t testing.TB, db *gorm.DB, ethClient eth.Client, keyStore bulletprooftxmanager.KeyStore, config config.EVMConfig, keys ...ethkey.Key) (*bulletprooftxmanager.EthBroadcaster, func()) {
+func NewEthBroadcaster(t testing.TB, db *gorm.DB, ethClient eth.Client, keyStore bulletprooftxmanager.KeyStore, config evmconfig.ChainScopedConfig, keyStates []ethkey.State) (*bulletprooftxmanager.EthBroadcaster, func()) {
 	t.Helper()
 	eventBroadcaster := postgres.NewEventBroadcaster(config.DatabaseURL(), 0, 0)
 	err := eventBroadcaster.Start()
 	require.NoError(t, err)
-	return bulletprooftxmanager.NewEthBroadcaster(db, ethClient, config, keyStore, &postgres.NullAdvisoryLocker{}, eventBroadcaster, keys, gas.NewFixedPriceEstimator(config), logger.Default), func() {
+	return bulletprooftxmanager.NewEthBroadcaster(db, ethClient, config, keyStore, &postgres.NullAdvisoryLocker{}, eventBroadcaster, keyStates, gas.NewFixedPriceEstimator(config), logger.Default), func() {
 		assert.NoError(t, eventBroadcaster.Close())
 	}
 }
 
-func NewEthConfirmer(t testing.TB, db *gorm.DB, ethClient eth.Client, config config.EVMConfig, ks bulletprooftxmanager.KeyStore, keys []ethkey.Key, fn func(id uuid.UUID, value interface{}) error) *bulletprooftxmanager.EthConfirmer {
+func NewEthConfirmer(t testing.TB, db *gorm.DB, ethClient eth.Client, config evmconfig.ChainScopedConfig, ks keystore.Eth, keyStates []ethkey.State, fn func(id uuid.UUID, value interface{}) error) *bulletprooftxmanager.EthConfirmer {
 	t.Helper()
-	ec := bulletprooftxmanager.NewEthConfirmer(db, ethClient, config, ks, &postgres.NullAdvisoryLocker{}, keys, gas.NewFixedPriceEstimator(config), fn, logger.Default)
+	ec := bulletprooftxmanager.NewEthConfirmer(db, ethClient, config, ks, &postgres.NullAdvisoryLocker{}, keyStates, gas.NewFixedPriceEstimator(config), fn, logger.Default)
 	return ec
 }
 
@@ -232,7 +244,7 @@ type TestApplication struct {
 	wsServer       *httptest.Server
 	Started        bool
 	Backend        *backends.SimulatedBackend
-	Key            ethkey.Key
+	Key            ethkey.KeyV2
 	allowUnstarted bool
 }
 
@@ -272,24 +284,22 @@ func NewWSServer(msg string, callback func(data []byte)) (*httptest.Server, stri
 	}
 }
 
-func NewTestEVMConfig(t testing.TB) *configtest.TestEVMConfig {
+func NewTestGeneralConfig(t testing.TB) *configtest.TestGeneralConfig {
 	overrides := configtest.GeneralConfigOverrides{
 		SecretGenerator: MockSecretGenerator{},
 		Dialect:         dialects.TransactionWrappedPostgres,
 		AdvisoryLockID:  null.IntFrom(NewRandomInt64()),
 	}
-	cfg := configtest.NewTestGeneralConfigWithOverrides(t, overrides)
-	evmcfg := configtest.NewTestEVMConfig(t, cfg)
-	return evmcfg
+	return configtest.NewTestGeneralConfigWithOverrides(t, overrides)
 }
 
-// NewApplicationEthereumDisabled creates a new application with default config but ethereum disabled
+// NewApplicationEVMDisabled creates a new application with default config but ethereum disabled
 // Useful for testing controllers
-func NewApplicationEthereumDisabled(t *testing.T) (*TestApplication, func()) {
+func NewApplicationEVMDisabled(t *testing.T) (*TestApplication, func()) {
 	t.Helper()
 
-	c := NewTestEVMConfig(t)
-	c.GeneralConfig.Overrides.EthereumDisabled = null.BoolFrom(true)
+	c := NewTestGeneralConfig(t)
+	c.Overrides.EVMDisabled = null.BoolFrom(true)
 
 	app, cleanup := NewApplicationWithConfig(t, c)
 
@@ -301,7 +311,7 @@ func NewApplicationEthereumDisabled(t *testing.T) (*TestApplication, func()) {
 func NewApplication(t testing.TB, flagsAndDeps ...interface{}) (*TestApplication, func()) {
 	t.Helper()
 
-	c := NewTestEVMConfig(t)
+	c := NewTestGeneralConfig(t)
 
 	app, cleanup := NewApplicationWithConfig(t, c, flagsAndDeps...)
 
@@ -313,30 +323,32 @@ func NewApplication(t testing.TB, flagsAndDeps ...interface{}) (*TestApplication
 func NewApplicationWithKey(t *testing.T, flagsAndDeps ...interface{}) (*TestApplication, func()) {
 	t.Helper()
 
-	config := NewTestEVMConfig(t)
+	config := NewTestGeneralConfig(t)
 	app, cleanup := NewApplicationWithConfigAndKey(t, config, flagsAndDeps...)
 	return app, cleanup
 }
 
 // NewApplicationWithConfigAndKey creates a new TestApplication with the given testorm
 // it will also provide an unlocked account on the keystore
-func NewApplicationWithConfigAndKey(t testing.TB, c *configtest.TestEVMConfig, flagsAndDeps ...interface{}) (*TestApplication, func()) {
+func NewApplicationWithConfigAndKey(t testing.TB, c *configtest.TestGeneralConfig, flagsAndDeps ...interface{}) (*TestApplication, func()) {
 	t.Helper()
 
 	app, cleanup := NewApplicationWithConfig(t, c, flagsAndDeps...)
+	require.NoError(t, app.KeyStore.Unlock(Password))
+	var chainID utils.Big = *utils.NewBig(&FixtureChainID)
 	for _, dep := range flagsAndDeps {
 		switch v := dep.(type) {
-		case ethkey.Key:
-			MustAddKeyToKeystore(t, &v, app.KeyStore.Eth())
+		case ethkey.KeyV2:
 			app.Key = v
+		case evmtypes.Chain:
+			chainID = v.ID
 		}
 	}
-	if app.Key.Address.Address() == utils.ZeroAddress {
-		app.Key, _ = MustAddRandomKeyToKeystore(t, app.KeyStore.Eth(), 0)
+	if app.Key.Address.IsZero() {
+		app.Key, _ = MustInsertRandomKey(t, app.KeyStore.Eth(), 0, chainID)
+	} else {
+		MustAddKeyToKeystore(t, app.Key, chainID.ToInt(), app.KeyStore.Eth())
 	}
-	require.NoError(t, app.KeyStore.Eth().Unlock(Password))
-	_, err := app.KeyStore.VRF().Unlock(VRFPassword)
-	require.NoError(t, err)
 
 	return app, cleanup
 }
@@ -345,15 +357,26 @@ const (
 	UseRealExternalInitiatorManager = "UseRealExternalInitiatorManager"
 )
 
-// NewApplicationWithConfig creates a New TestApplication with specified test config
-func NewApplicationWithConfig(t testing.TB, c *configtest.TestEVMConfig, flagsAndDeps ...interface{}) (*TestApplication, func()) {
+// NewApplicationWithConfig creates a New TestApplication with specified test config.
+// This should only be used in full integration tests. For controller tests, see NewApplicationEVMDisabled
+func NewApplicationWithConfig(t testing.TB, cfg *configtest.TestGeneralConfig, flagsAndDeps ...interface{}) (*TestApplication, func()) {
 	t.Helper()
 
 	var ethClient eth.Client = &eth.NullClient{}
-	var advisoryLocker postgres.AdvisoryLocker = &postgres.NullAdvisoryLocker{}
-	var externalInitiatorManager webhook.ExternalInitiatorManager = &webhook.NullExternalInitiatorManager{}
-	var useRealExternalInitiatorManager bool
 
+	var advisoryLocker postgres.AdvisoryLocker = &postgres.NullAdvisoryLocker{}
+	var eventBroadcaster postgres.EventBroadcaster = postgres.NewNullEventBroadcaster()
+	var lggr *logger.Logger = cfg.CreateProductionLogger()
+	shutdownSignal := &testShutdownSignal{t}
+	store, err := strpkg.NewInsecureStore(cfg, advisoryLocker, shutdownSignal)
+	require.NoError(t, err)
+	db := store.DB
+	sqlxDB := postgres.UnwrapGormDB(db)
+
+	var externalInitiatorManager webhook.ExternalInitiatorManager
+	externalInitiatorManager = &webhook.NullExternalInitiatorManager{}
+	var useRealExternalInitiatorManager bool
+	var chainORM evmtypes.ORM
 	for _, flag := range flagsAndDeps {
 		switch dep := flag.(type) {
 		case eth.Client:
@@ -362,23 +385,69 @@ func NewApplicationWithConfig(t testing.TB, c *configtest.TestEVMConfig, flagsAn
 			advisoryLocker = dep
 		case webhook.ExternalInitiatorManager:
 			externalInitiatorManager = dep
+		case evmtypes.Chain:
+			if chainORM != nil {
+				panic("cannot set more than one chain")
+			}
+			chainORM = evmtest.NewMockORM([]evmtypes.Chain{dep})
+		case postgres.EventBroadcaster:
+			eventBroadcaster = dep
+		case *logger.Logger:
+			lggr = dep
 		default:
 			switch flag {
 			case UseRealExternalInitiatorManager:
-				useRealExternalInitiatorManager = true
+				externalInitiatorManager = webhook.NewExternalInitiatorManager(db, utils.UnrestrictedClient)
 			}
 
 		}
 	}
+	lggr.SetDB(db)
+	cfg.SetDB(db)
+	if chainORM == nil {
+		chainORM = evm.NewORM(sqlxDB)
+	}
+
+	keyStore := keystore.New(db, utils.FastScryptParams)
+	chainSet, err := evm.LoadChainSet(evm.ChainSetOpts{
+		ORM:              chainORM,
+		Config:           cfg,
+		Logger:           lggr,
+		GormDB:           db,
+		SQLxDB:           sqlxDB,
+		KeyStore:         keyStore.Eth(),
+		AdvisoryLocker:   advisoryLocker,
+		EventBroadcaster: eventBroadcaster,
+		GenEthClient: func(c evmtypes.Chain) eth.Client {
+			if (ethClient.ChainID()).Cmp(cfg.DefaultChainID()) != 0 {
+				t.Fatalf("expected eth client ChainID %d to match configured DefaultChainID %d", ethClient.ChainID(), cfg.DefaultChainID())
+			}
+			return ethClient
+		},
+	})
+	if err != nil {
+		logger.Fatal(err)
+	}
 
 	ta := &TestApplication{t: t}
-	appInstance, err := chainlink.NewApplication(logger.Default, c, ethClient, advisoryLocker)
+	appInstance, err := chainlink.NewApplication(chainlink.ApplicationOpts{
+		Config:                   cfg,
+		AdvisoryLocker:           advisoryLocker,
+		EventBroadcaster:         eventBroadcaster,
+		ShutdownSignal:           shutdownSignal,
+		Store:                    store,
+		GormDB:                   db,
+		KeyStore:                 keyStore,
+		ChainSet:                 chainSet,
+		Logger:                   lggr,
+		ExternalInitiatorManager: externalInitiatorManager,
+	})
 	require.NoError(t, err)
 	app := appInstance.(*chainlink.ChainlinkApplication)
 	ta.ChainlinkApplication = app
 	server := newServer(ta)
 
-	c.GeneralConfig.Overrides.ClientNodeURL = null.StringFrom(server.URL)
+	cfg.Overrides.ClientNodeURL = null.StringFrom(server.URL)
 
 	if !useRealExternalInitiatorManager {
 		app.ExternalInitiatorManager = externalInitiatorManager
@@ -395,6 +464,12 @@ func NewApplicationWithConfig(t testing.TB, c *configtest.TestEVMConfig, flagsAn
 		err := ta.StopIfStarted()
 		require.NoError(t, err)
 	}
+}
+
+func NewEthMocksWithDefaultChain(t testing.TB) (c *mocks.Client, s *mocks.Subscription, f func()) {
+	c, s, f = NewEthMocks(t)
+	c.On("ChainID").Return(&FixtureChainID).Maybe()
+	return
 }
 
 func NewEthMocks(t testing.TB) (*mocks.Client, *mocks.Subscription, func()) {
@@ -420,10 +495,22 @@ func NewEthClientAndSubMock(t mock.TestingT) (*mocks.Client, *mocks.Subscription
 	return mockEth, mockSub
 }
 
+func NewEthClientAndSubMockWithDefaultChain(t mock.TestingT) (*mocks.Client, *mocks.Subscription) {
+	mockEth, mockSub := NewEthClientAndSubMock(t)
+	mockEth.On("ChainID").Return(&FixtureChainID).Maybe()
+	return mockEth, mockSub
+}
+
 func NewEthClientMock(t mock.TestingT) *mocks.Client {
 	mockEth := new(mocks.Client)
 	mockEth.Test(t)
 	return mockEth
+}
+
+func NewEthClientMockWithDefaultChain(t testing.TB) *mocks.Client {
+	c := NewEthClientMock(t)
+	c.On("ChainID").Return(&FixtureChainID).Maybe()
+	return c
 }
 
 func NewEthMocksWithStartupAssertions(t testing.TB) (*mocks.Client, *mocks.Subscription, func()) {
@@ -432,7 +519,8 @@ func NewEthMocksWithStartupAssertions(t testing.TB) (*mocks.Client, *mocks.Subsc
 	c.On("SubscribeNewHead", mock.Anything, mock.Anything).Maybe().Return(EmptyMockSubscription(), nil)
 	c.On("SendTransaction", mock.Anything, mock.Anything).Maybe().Return(nil)
 	c.On("HeadByNumber", mock.Anything, (*big.Int)(nil)).Maybe().Return(Head(0), nil)
-	c.On("ChainID", mock.Anything).Maybe().Return(big.NewInt(eth.NullClientChainID), nil)
+	c.On("ChainID").Maybe().Return(&FixtureChainID)
+	c.On("Close").Maybe().Return()
 
 	block := types.NewBlockWithHeader(&types.Header{
 		Number: big.NewInt(100),
@@ -458,15 +546,12 @@ func (ta *TestApplication) NewBox() packr.Box {
 func (ta *TestApplication) Start() error {
 	ta.t.Helper()
 	ta.Started = true
-	// TODO - RYAN - we should have a global keystore.Unlock() function
-	// https://app.clubhouse.io/chainlinklabs/story/7735/combine-keystores
-	err := ta.ChainlinkApplication.KeyStore.Eth().Unlock(Password)
+	err := ta.ChainlinkApplication.KeyStore.Unlock(Password)
 	if err != nil {
 		return err
 	}
 
-	err = ta.ChainlinkApplication.Start()
-	return err
+	return ta.ChainlinkApplication.Start()
 }
 
 // Stop will stop the test application and perform cleanup
@@ -483,6 +568,7 @@ func (ta *TestApplication) Stop() error {
 	// TODO: Here we double close, which is less than ideal.
 	// We would prefer to invoke a method on an interface that
 	// cleans up only in test.
+	// FIXME: TestApplication probably needs to simply be removed
 	err := ta.ChainlinkApplication.StopIfStarted()
 	if err != nil {
 		return err
@@ -503,11 +589,11 @@ func (ta *TestApplication) MustSeedNewSession() string {
 	return session.ID
 }
 
-// ImportKey adds private key to the application disk keystore, not database.
-func (ta *TestApplication) ImportKey(content string) {
-	_, err := ta.KeyStore.Eth().ImportKey([]byte(content), Password)
+// ImportKey adds private key to the application keystore and database
+func (ta *TestApplication) Import(content string) {
+	require.NoError(ta.t, ta.KeyStore.Unlock(Password))
+	_, err := ta.KeyStore.Eth().Import([]byte(content), Password, &FixtureChainID)
 	require.NoError(ta.t, err)
-	require.NoError(ta.t, ta.KeyStore.Eth().Unlock(Password))
 }
 
 func (ta *TestApplication) NewHTTPClient() HTTPClientCleaner {
@@ -526,14 +612,9 @@ func (ta *TestApplication) NewClientAndRenderer() (*cmd.Client, *RendererMock) {
 	sessionID := ta.MustSeedNewSession()
 	r := &RendererMock{}
 	client := &cmd.Client{
-		Renderer:   r,
-		Config:     ta.GetEVMConfig(),
-		AppFactory: seededAppFactory{ta.ChainlinkApplication},
-		KeyStoreAuthenticator: CallbackAuthenticator{
-			Callback: func(*keystore.Eth, string) (string, error) {
-				return Password, nil
-			},
-		},
+		Renderer:                       r,
+		Config:                         ta.GetConfig(),
+		AppFactory:                     seededAppFactory{ta.ChainlinkApplication},
 		FallbackAPIInitializer:         &MockAPIInitializer{},
 		Runner:                         EmptyRunner{},
 		HTTP:                           NewMockAuthenticatedHTTPClient(ta.Config, sessionID),
@@ -549,9 +630,8 @@ func (ta *TestApplication) NewAuthenticatingClient(prompter cmd.Prompter) *cmd.C
 	cookieAuth := cmd.NewSessionCookieAuthenticator(ta.GetConfig(), &cmd.MemoryCookieStore{})
 	client := &cmd.Client{
 		Renderer:                       &RendererMock{},
-		Config:                         ta.GetEVMConfig(),
+		Config:                         ta.GetConfig(),
 		AppFactory:                     seededAppFactory{ta.ChainlinkApplication},
-		KeyStoreAuthenticator:          CallbackAuthenticator{func(*keystore.Eth, string) (string, error) { return Password, nil }},
 		FallbackAPIInitializer:         &MockAPIInitializer{},
 		Runner:                         EmptyRunner{},
 		HTTP:                           cmd.NewAuthenticatedHTTPClient(ta.Config, cookieAuth, models.SessionRequest{}),
@@ -588,13 +668,22 @@ func NewStoreWithConfig(t testing.TB, c config.GeneralConfig, flagsAndDeps ...in
 func NewStore(t *testing.T, flagsAndDeps ...interface{}) (*strpkg.Store, func()) {
 	t.Helper()
 
-	c := NewTestEVMConfig(t)
+	c := NewTestGeneralConfig(t)
 	store, storeCleanup := NewStoreWithConfig(t, c, flagsAndDeps...)
 	return store, storeCleanup
 }
 
-func NewKeyStore(t testing.TB, db *gorm.DB) *keystore.Master {
-	return keystore.New(db, utils.FastScryptParams)
+type fastScriptConfig struct{}
+
+func (fastScriptConfig) InsecureFastScrypt() bool {
+	return true
+}
+
+// NewKeyStore returns a new, unlocked keystore
+func NewKeyStore(t testing.TB, db *gorm.DB) keystore.Master {
+	keystore := keystore.New(db, utils.FastScryptParams)
+	require.NoError(t, keystore.Unlock(Password))
+	return keystore
 }
 
 func cleanUpStore(t testing.TB, store *strpkg.Store) {
@@ -993,13 +1082,13 @@ func Head(val interface{}) *models.Head {
 	time := uint64(0)
 	switch t := val.(type) {
 	case int:
-		h = models.NewHead(big.NewInt(int64(t)), utils.NewHash(), utils.NewHash(), time)
+		h = models.NewHead(big.NewInt(int64(t)), utils.NewHash(), utils.NewHash(), time, utils.NewBig(&FixtureChainID))
 	case uint64:
-		h = models.NewHead(big.NewInt(int64(t)), utils.NewHash(), utils.NewHash(), time)
+		h = models.NewHead(big.NewInt(int64(t)), utils.NewHash(), utils.NewHash(), time, utils.NewBig(&FixtureChainID))
 	case int64:
-		h = models.NewHead(big.NewInt(t), utils.NewHash(), utils.NewHash(), time)
+		h = models.NewHead(big.NewInt(t), utils.NewHash(), utils.NewHash(), time, utils.NewBig(&FixtureChainID))
 	case *big.Int:
-		h = models.NewHead(t, utils.NewHash(), utils.NewHash(), time)
+		h = models.NewHead(t, utils.NewHash(), utils.NewHash(), time, utils.NewBig(&FixtureChainID))
 	default:
 		logger.Panicf("Could not convert %v of type %T to Head", val, val)
 	}
@@ -1247,39 +1336,6 @@ func MustParseURL(input string) *url.URL {
 	return u
 }
 
-// GenericEncode eth encodes values based on the provided types
-func GenericEncode(types []string, values ...interface{}) ([]byte, error) {
-	if len(values) != len(types) {
-		return nil, errors.New("must include same number of values as types")
-	}
-	var args abi.Arguments
-	for _, t := range types {
-		ty, _ := abi.NewType(t, "", nil)
-		args = append(args, abi.Argument{Type: ty})
-	}
-	out, err := args.PackValues(values)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func MustGenericEncode(types []string, values ...interface{}) []byte {
-	if len(values) != len(types) {
-		panic("must include same number of values as types")
-	}
-	var args abi.Arguments
-	for _, t := range types {
-		ty, _ := abi.NewType(t, "", nil)
-		args = append(args, abi.Argument{Type: ty})
-	}
-	out, err := args.PackValues(values)
-	if err != nil {
-		panic(err)
-	}
-	return out
-}
-
 func MakeRoundStateReturnData(
 	roundID uint64,
 	eligible bool,
@@ -1377,9 +1433,10 @@ func MockApplicationEthCalls(t *testing.T, app *TestApplication, ethClient *mock
 	sub := new(mocks.Subscription)
 	sub.On("Err").Return(nil)
 	ethClient.On("SubscribeNewHead", mock.Anything, mock.Anything).Return(sub, nil)
-	ethClient.On("ChainID", mock.Anything).Return(app.Store.Config.ChainID(), nil)
+	ethClient.On("ChainID", mock.Anything).Return(app.GetConfig().DefaultChainID(), nil)
 	ethClient.On("PendingNonceAt", mock.Anything, mock.Anything).Return(uint64(0), nil).Maybe()
 	ethClient.On("HeadByNumber", mock.Anything, mock.Anything).Return(nil, nil).Maybe()
+	ethClient.On("Close").Return().Maybe()
 
 	// Stop
 	sub.On("Unsubscribe").Return(nil)
@@ -1486,6 +1543,8 @@ func SimulateIncomingHeads(t *testing.T, args SimulateIncomingHeadsArgs) (func()
 	return cleanup, chDone
 }
 
+// Blocks - a helper logic to construct a range of linked heads
+// and an ability to fork and create logs from them
 type Blocks struct {
 	t       *testing.T
 	Hashes  []common.Hash
@@ -1522,13 +1581,34 @@ func (b *Blocks) Head(number uint64) *models.Head {
 }
 
 func (b *Blocks) ForkAt(t *testing.T, blockNum int64, numHashes int) *Blocks {
-	blocks2 := NewBlocks(t, len(b.Heads)+numHashes)
-
-	if _, exists := blocks2.Heads[blockNum]; !exists {
-		logger.Fatalf("Not enough length for block num: %v", blockNum)
+	forked := NewBlocks(t, len(b.Heads)+numHashes)
+	if _, exists := forked.Heads[blockNum]; !exists {
+		t.Fatalf("Not enough length for block num: %v", blockNum)
 	}
-	blocks2.Heads[blockNum].Parent = b.Heads[blockNum].Parent
-	return blocks2
+
+	for i := int64(0); i < blockNum; i++ {
+		forked.Heads[i] = b.Heads[i]
+	}
+
+	forked.Heads[blockNum].ParentHash = b.Heads[blockNum].ParentHash
+	forked.Heads[blockNum].Parent = b.Heads[blockNum].Parent
+	return forked
+}
+
+func (b *Blocks) NewHead(number uint64) *models.Head {
+	parentNumber := number - 1
+	parent, ok := b.Heads[int64(parentNumber)]
+	if !ok {
+		b.t.Fatalf("Can't find parent block at index: %v", parentNumber)
+	}
+	head := &models.Head{
+		Number:     parent.Number + 1,
+		Hash:       utils.NewHash(),
+		ParentHash: parent.Hash,
+		Parent:     parent,
+		Timestamp:  time.Unix(parent.Number+1, 0),
+	}
+	return head
 }
 
 func NewBlocks(t *testing.T, numHashes int) *Blocks {
@@ -1538,7 +1618,7 @@ func NewBlocks(t *testing.T, numHashes int) *Blocks {
 		hash := utils.NewHash()
 		hashes = append(hashes, hash)
 
-		heads[i] = &models.Head{Hash: hash, Number: i}
+		heads[i] = &models.Head{Hash: hash, Number: i, Timestamp: time.Unix(i, 0)}
 		if i > 0 {
 			parent := heads[i-1]
 			heads[i].Parent = parent
@@ -1557,6 +1637,30 @@ func NewBlocks(t *testing.T, numHashes int) *Blocks {
 		mHashes: hashesMap,
 		Heads:   heads,
 	}
+}
+
+// HeadBuffer - stores heads in sequence, with increasing timestamps
+type HeadBuffer struct {
+	t     *testing.T
+	Heads []*models.Head
+}
+
+func NewHeadBuffer(t *testing.T) *HeadBuffer {
+	return &HeadBuffer{
+		t:     t,
+		Heads: make([]*models.Head, 0),
+	}
+}
+
+func (hb *HeadBuffer) Append(head *models.Head) {
+	cloned := &models.Head{
+		Number:     head.Number,
+		Hash:       head.Hash,
+		ParentHash: head.ParentHash,
+		Parent:     head.Parent,
+		Timestamp:  time.Unix(int64(len(hb.Heads)), 0),
+	}
+	hb.Heads = append(hb.Heads, cloned)
 }
 
 type HeadTrackableFunc func(context.Context, models.Head)
@@ -1637,11 +1741,12 @@ func AssertRecordEventually(t *testing.T, store *strpkg.Store, model interface{}
 	}, DBWaitTimeout, DBPollingInterval).Should(gomega.BeTrue())
 }
 
-func MustSendingKeys(t *testing.T, ethKeyStore *keystore.Eth) (keys []ethkey.Key) {
-	var err error
-	keys, err = ethKeyStore.SendingKeys()
+func MustSendingKeyStates(t *testing.T, ethKeyStore keystore.Eth) []ethkey.State {
+	keys, err := ethKeyStore.SendingKeys()
 	require.NoError(t, err)
-	return keys
+	states, err := ethKeyStore.GetStatesForKeys(keys)
+	require.NoError(t, err)
+	return states
 }
 
 func MustRandomP2PPeerID(t *testing.T) p2ppeer.ID {
@@ -1664,4 +1769,15 @@ func AssertPipelineTaskRunsSuccessful(t testing.TB, runs []pipeline.TaskRun) {
 	for i, run := range runs {
 		require.True(t, run.Error.IsZero(), fmt.Sprintf("pipeline.Task run failed (idx: %v, dotID: %v, error: '%v')", i, run.GetDotID(), run.Error.ValueOrZero()))
 	}
+}
+
+func NewTestChainScopedConfig(t testing.TB) evmconfig.ChainScopedConfig {
+	cfg := NewTestGeneralConfig(t)
+	return evmtest.NewChainScopedConfig(t, cfg)
+}
+
+func MustGetStateForKey(t testing.TB, kst keystore.Eth, key ethkey.KeyV2) ethkey.State {
+	states, err := kst.GetStatesForKeys([]ethkey.KeyV2{key})
+	require.NoError(t, err)
+	return states[0]
 }

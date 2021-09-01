@@ -36,11 +36,12 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/mitchellh/mapstructure v1.4.1
 	github.com/multiformats/go-multiaddr v0.3.3
+	github.com/okex/exchain-ethereum-compatible v1.0.2 // indirect
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/onsi/gomega v1.14.0
 	github.com/pelletier/go-toml v1.9.3
-	github.com/peterh/liner v1.2.1 // indirect
 	github.com/pkg/errors v0.9.1
+	github.com/pressly/goose/v3 v3.1.0 // indirect
 	github.com/prometheus/client_golang v1.10.0
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1
@@ -49,9 +50,9 @@ require (
 	github.com/scylladb/go-reflectx v1.0.1
 	github.com/shopspring/decimal v1.2.0
 	github.com/sirupsen/logrus v1.8.1 // indirect
-	github.com/smartcontractkit/libocr v0.0.0-20210803133922-ddddd3dce7e5
-	github.com/smartcontractkit/sqlx v1.3.5-0.20210805004948-4be295aacbeb // indirect
-	github.com/smartcontractkit/wsrpc v0.3.2
+	github.com/smartcontractkit/libocr v0.0.0-20210826183649-d12971936c12
+	github.com/smartcontractkit/sqlx v1.3.5-0.20210805004948-4be295aacbeb
+	github.com/smartcontractkit/wsrpc v0.3.4
 	github.com/spf13/viper v1.8.1
 	github.com/stretchr/testify v1.7.0
 	github.com/tevino/abool v0.0.0-20170917061928-9b9efcf221b5

@@ -52,7 +52,7 @@ type listenerV1 struct {
 	db              *gorm.DB
 	headBroadcaster httypes.HeadBroadcasterRegistry
 	txm             bulletprooftxmanager.TxManager
-	vrfks           *keystore.VRF
+	vrfks           keystore.VRF
 	gethks          GethKeyStore
 	reqLogs         *utils.Mailbox
 	chStop          chan struct{}
@@ -246,7 +246,7 @@ func (lsn *listenerV1) runLogListener(unsubscribes []func(), minConfs uint32) {
 }
 
 func (lsn *listenerV1) handleLog(lb log.Broadcast, minConfs uint32) {
-	fmt.Println("log received", lb.String(), lb.DecodedLog())
+	lsn.l.Infow("VRFListener: log received", lb.String(), lb.DecodedLog())
 	if v, ok := lb.DecodedLog().(*solidity_vrf_coordinator_interface.VRFCoordinatorRandomnessRequestFulfilled); ok {
 		if !lsn.shouldProcessLog(lb) {
 			return

@@ -7,6 +7,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
@@ -43,13 +44,16 @@ func TestPipelineORM_Integration(t *testing.T) {
     `
 
 	config, oldORM, cleanupDB := heavyweight.FullTestORM(t, "pipeline_orm", true, true)
-	config.GeneralConfig.Overrides.SetDefaultHTTPTimeout(30 * time.Millisecond)
-	config.GeneralConfig.Overrides.DefaultMaxHTTPAttempts = null.IntFrom(1)
+	config.Overrides.SetDefaultHTTPTimeout(30 * time.Millisecond)
+	config.Overrides.DefaultMaxHTTPAttempts = null.IntFrom(1)
 	defer cleanupDB()
 	db := oldORM.DB
+	keyStore := cltest.NewKeyStore(t, db)
+	ethKeyStore := keyStore.Eth()
 
-	key := cltest.MustInsertRandomKey(t, db)
-	transmitterAddress := key.Address.Address()
+	_, transmitterAddress := cltest.MustInsertRandomKey(t, ethKeyStore)
+	keyStore.OCR().Add(cltest.DefaultOCRKey)
+	keyStore.P2P().Add(cltest.DefaultP2PKey)
 
 	var specID int32
 
@@ -119,9 +123,10 @@ func TestPipelineORM_Integration(t *testing.T) {
 		clearJobsDb(t, db)
 		orm, eventBroadcaster, cleanup := cltest.NewPipelineORM(t, config, db)
 		defer cleanup()
-		runner := pipeline.NewRunner(orm, config, nil, nil, nil, nil)
+		cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{Client: cltest.NewEthClientMockWithDefaultChain(t), DB: db, GeneralConfig: config})
+		runner := pipeline.NewRunner(orm, config, cc, nil, nil)
 		defer runner.Close()
-		jobORM := job.NewORM(db, config, orm, eventBroadcaster, &postgres.NullAdvisoryLocker{})
+		jobORM := job.NewORM(db, cc, orm, eventBroadcaster, &postgres.NullAdvisoryLocker{}, keyStore)
 		defer jobORM.Close()
 
 		dbSpec := makeVoterTurnoutOCRJobSpec(t, db, transmitterAddress)

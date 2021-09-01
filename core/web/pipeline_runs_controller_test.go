@@ -30,11 +30,12 @@ func TestPipelineRunsController_CreateWithBody_HappyPath(t *testing.T) {
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
-	cfg := cltest.NewTestEVMConfig(t)
+	cfg := cltest.NewTestGeneralConfig(t)
 
-	cfg.GeneralConfig.Overrides.DefaultMaxHTTPAttempts = null.IntFrom(1)
-	cfg.GeneralConfig.Overrides.SetDefaultHTTPTimeout(2 * time.Second)
-	cfg.GeneralConfig.Overrides.SetTriggerFallbackDBPollInterval(10 * time.Millisecond)
+	cfg.Overrides.DefaultMaxHTTPAttempts = null.IntFrom(1)
+	cfg.Overrides.SetDefaultHTTPTimeout(2 * time.Second)
+	cfg.Overrides.SetTriggerFallbackDBPollInterval(10 * time.Millisecond)
+	cfg.Overrides.EthereumDisabled = null.BoolFrom(true)
 
 	app, cleanup := cltest.NewApplicationWithConfig(t, cfg, ethClient)
 	defer cleanup()
@@ -97,11 +98,12 @@ func TestPipelineRunsController_CreateNoBody_HappyPath(t *testing.T) {
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
-	cfg := cltest.NewTestEVMConfig(t)
+	cfg := cltest.NewTestGeneralConfig(t)
 
-	cfg.GeneralConfig.Overrides.DefaultMaxHTTPAttempts = null.IntFrom(1)
-	cfg.GeneralConfig.Overrides.SetDefaultHTTPTimeout(2 * time.Second)
-	cfg.GeneralConfig.Overrides.SetTriggerFallbackDBPollInterval(10 * time.Millisecond)
+	cfg.Overrides.DefaultMaxHTTPAttempts = null.IntFrom(1)
+	cfg.Overrides.SetDefaultHTTPTimeout(2 * time.Second)
+	cfg.Overrides.SetTriggerFallbackDBPollInterval(10 * time.Millisecond)
+	cfg.Overrides.EthereumDisabled = null.BoolFrom(true)
 
 	app, cleanup := cltest.NewApplicationWithConfig(t, cfg, ethClient)
 	defer cleanup()
@@ -255,11 +257,7 @@ func TestPipelineRunsController_Show_HappyPath(t *testing.T) {
 
 func TestPipelineRunsController_ShowRun_InvalidID(t *testing.T) {
 	t.Parallel()
-	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
-	defer assertMocksCalled()
-	app, cleanup := cltest.NewApplication(t,
-		ethClient,
-	)
+	app, cleanup := cltest.NewApplicationEVMDisabled(t)
 	defer cleanup()
 	require.NoError(t, app.Start())
 	client := app.NewHTTPClient()
@@ -273,14 +271,16 @@ func setupPipelineRunsControllerTests(t *testing.T) (cltest.HTTPClientCleaner, i
 	t.Parallel()
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
-	app, cleanup := cltest.NewApplication(t,
-		ethClient,
-	)
+	cfg := cltest.NewTestGeneralConfig(t)
+	cfg.Overrides.EthereumDisabled = null.BoolFrom(true)
+	app, cleanup := cltest.NewApplicationWithConfig(t, cfg, ethClient)
 	require.NoError(t, app.Start())
+	app.KeyStore.OCR().Add(cltest.DefaultOCRKey)
+	app.KeyStore.P2P().Add(cltest.DefaultP2PKey)
 	client := app.NewHTTPClient()
 	mockHTTP, cleanupHTTP := cltest.NewHTTPMockServer(t, http.StatusOK, "GET", `{"USD": 1}`)
 
-	key := cltest.MustInsertRandomKey(t, app.Store.DB)
+	key, _ := cltest.MustInsertRandomKey(t, app.KeyStore.Eth())
 
 	sp := fmt.Sprintf(`
 	type               = "offchainreporting"
@@ -311,9 +311,6 @@ func setupPipelineRunsControllerTests(t *testing.T) (cltest.HTTPClientCleaner, i
 	err = toml.Unmarshal([]byte(sp), &os)
 	require.NoError(t, err)
 	ocrJobSpec.OffchainreportingOracleSpec = &os
-
-	err = app.GetKeyStore().OCR().Unlock(cltest.Password)
-	require.NoError(t, err)
 
 	jb, err := app.AddJobV2(context.Background(), ocrJobSpec, null.String{})
 	require.NoError(t, err)
