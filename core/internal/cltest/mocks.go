@@ -21,9 +21,8 @@ import (
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/core/services/eth"
-	"github.com/smartcontractkit/chainlink/core/store"
+	"github.com/smartcontractkit/chainlink/core/sessions"
 	"github.com/smartcontractkit/chainlink/core/store/config"
-	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/web"
 	"go.uber.org/atomic"
 
@@ -62,8 +61,8 @@ func (mes *MockSubscription) Unsubscribe() {
 		close(mes.channel.(chan struct{}))
 	case chan gethTypes.Log:
 		close(mes.channel.(chan gethTypes.Log))
-	case chan *models.Head:
-		close(mes.channel.(chan *models.Head))
+	case chan *eth.Head:
+		close(mes.channel.(chan *eth.Head))
 	default:
 		logger.Fatal(fmt.Sprintf("Unable to close MockSubscription channel of type %T", mes.channel))
 	}
@@ -225,7 +224,7 @@ func NewHTTPMockServer(
 	wantMethod string,
 	response string,
 	callback ...func(http.Header, string),
-) (*httptest.Server, func()) {
+) *httptest.Server {
 	called := false
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, err := ioutil.ReadAll(r.Body)
@@ -241,10 +240,11 @@ func NewHTTPMockServer(
 	})
 
 	server := httptest.NewServer(handler)
-	return server, func() {
+	t.Cleanup(func() {
 		server.Close()
 		assert.True(t, called, "expected call Mock HTTP endpoint '%s'", server.URL)
-	}
+	})
+	return server
 }
 
 // NewHTTPMockServerWithRequest creates http test server that makes the request
@@ -254,7 +254,7 @@ func NewHTTPMockServerWithRequest(
 	status int,
 	response string,
 	callback func(r *http.Request),
-) (*httptest.Server, func()) {
+) *httptest.Server {
 	called := false
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callback(r)
@@ -265,10 +265,11 @@ func NewHTTPMockServerWithRequest(
 	})
 
 	server := httptest.NewServer(handler)
-	return server, func() {
+	t.Cleanup(func() {
 		server.Close()
 		assert.True(t, called, "expected call Mock HTTP endpoint '%s'", server.URL)
-	}
+	})
+	return server
 }
 
 func NewHTTPMockServerWithAlterableResponse(
@@ -341,7 +342,7 @@ type MockHeadTrackable struct {
 }
 
 // OnNewLongestChain increases the OnNewLongestChainCount count by one
-func (m *MockHeadTrackable) OnNewLongestChain(context.Context, models.Head) {
+func (m *MockHeadTrackable) OnNewLongestChain(context.Context, eth.Head) {
 	m.onNewHeadCount.Inc()
 }
 
@@ -365,17 +366,17 @@ func (ns NeverSleeper) After() time.Duration { return 0 * time.Microsecond }
 // Duration returns a duration
 func (ns NeverSleeper) Duration() time.Duration { return 0 * time.Microsecond }
 
-func MustRandomUser() models.User {
+func MustRandomUser() sessions.User {
 	email := fmt.Sprintf("user-%v@chainlink.test", NewRandomInt64())
-	r, err := models.NewUser(email, Password)
+	r, err := sessions.NewUser(email, Password)
 	if err != nil {
 		logger.Panic(err)
 	}
 	return r
 }
 
-func MustNewUser(t *testing.T, email, password string) models.User {
-	r, err := models.NewUser(email, password)
+func MustNewUser(t *testing.T, email, password string) sessions.User {
+	r, err := sessions.NewUser(email, password)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,17 +387,17 @@ type MockAPIInitializer struct {
 	Count int
 }
 
-func (m *MockAPIInitializer) Initialize(store *store.Store) (models.User, error) {
-	if user, err := store.FindUser(); err == nil {
+func (m *MockAPIInitializer) Initialize(orm sessions.ORM) (sessions.User, error) {
+	if user, err := orm.FindUser(); err == nil {
 		return user, err
 	}
 	m.Count++
 	user := MustRandomUser()
-	return user, store.SaveUser(&user)
+	return user, orm.CreateUser(&user)
 }
 
 func NewMockAuthenticatedHTTPClient(cfg cmd.HTTPClientConfig, sessionID string) cmd.HTTPClient {
-	return cmd.NewAuthenticatedHTTPClient(cfg, MockCookieAuthenticator{SessionID: sessionID}, models.SessionRequest{})
+	return cmd.NewAuthenticatedHTTPClient(cfg, MockCookieAuthenticator{SessionID: sessionID}, sessions.SessionRequest{})
 }
 
 type MockCookieAuthenticator struct {
@@ -408,7 +409,7 @@ func (m MockCookieAuthenticator) Cookie() (*http.Cookie, error) {
 	return MustGenerateSessionCookie(m.SessionID), m.Error
 }
 
-func (m MockCookieAuthenticator) Authenticate(models.SessionRequest) (*http.Cookie, error) {
+func (m MockCookieAuthenticator) Authenticate(sessions.SessionRequest) (*http.Cookie, error) {
 	return MustGenerateSessionCookie(m.SessionID), m.Error
 }
 
@@ -417,12 +418,12 @@ type MockSessionRequestBuilder struct {
 	Error error
 }
 
-func (m *MockSessionRequestBuilder) Build(string) (models.SessionRequest, error) {
+func (m *MockSessionRequestBuilder) Build(string) (sessions.SessionRequest, error) {
 	m.Count++
 	if m.Error != nil {
-		return models.SessionRequest{}, m.Error
+		return sessions.SessionRequest{}, m.Error
 	}
-	return models.SessionRequest{Email: APIEmail, Password: Password}, nil
+	return sessions.SessionRequest{Email: APIEmail, Password: Password}, nil
 }
 
 type MockSecretGenerator struct{}

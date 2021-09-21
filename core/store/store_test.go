@@ -6,36 +6,18 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/services/versioning"
 	"github.com/smartcontractkit/chainlink/core/static"
-	"github.com/smartcontractkit/chainlink/core/store"
-	"github.com/smartcontractkit/chainlink/core/store/migrate"
 
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestStore_SquashMigrationUpgrade(t *testing.T) {
-	_, orm, cleanup := heavyweight.FullTestORM(t, "migrationssquash", false, false)
-	defer cleanup()
-	db := orm.DB
-
-	// Latest migrations should work fine.
-	static.Version = "0.9.11"
-	err := migrate.Migrate(postgres.UnwrapGormDB(db).DB)
-	require.NoError(t, err)
-	err = store.CheckSquashUpgrade(db)
-	require.NoError(t, err)
-	static.Version = "unset"
-}
-
 func TestStore_UpsertLatestNodeVersion(t *testing.T) {
 	t.Parallel()
 
 	t.Run("static version unset", func(t *testing.T) {
-		store, cleanup := cltest.NewStore(t)
-		t.Cleanup(cleanup)
+		store := cltest.NewStore(t)
 		verORM := versioning.NewORM(postgres.WrapDbWithSqlx(
 			postgres.MustSQLDB(store.DB)),
 		)
@@ -49,8 +31,7 @@ func TestStore_UpsertLatestNodeVersion(t *testing.T) {
 
 	t.Run("static version set", func(t *testing.T) {
 		static.Version = "0.9.11"
-		store, cleanup := cltest.NewStore(t)
-		t.Cleanup(cleanup)
+		store := cltest.NewStore(t)
 		verORM := versioning.NewORM(postgres.WrapDbWithSqlx(
 			postgres.MustSQLDB(store.DB)),
 		)
@@ -66,16 +47,14 @@ func TestStore_UpsertLatestNodeVersion(t *testing.T) {
 
 func TestStore_Start(t *testing.T) {
 	t.Parallel()
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
+	store := cltest.NewStore(t)
 	assert.NoError(t, store.Start())
 }
 
 func TestStore_Close(t *testing.T) {
 	t.Parallel()
 
-	s, cleanup := cltest.NewStore(t)
-	defer cleanup()
+	s := cltest.NewStore(t)
 
 	assert.NoError(t, s.Close())
 }

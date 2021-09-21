@@ -14,13 +14,14 @@ import (
 
 	"github.com/pelletier/go-toml"
 	"github.com/smartcontractkit/chainlink/core/auth"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	"github.com/smartcontractkit/chainlink/core/cmd"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/job"
-	"github.com/smartcontractkit/chainlink/core/store/models"
+	"github.com/smartcontractkit/chainlink/core/sessions"
 	"github.com/smartcontractkit/chainlink/core/store/presenters"
 	"github.com/smartcontractkit/chainlink/core/web"
 	"github.com/stretchr/testify/assert"
@@ -69,14 +70,11 @@ func startNewApplication(t *testing.T, setup ...func(opts *startOptions)) *cltes
 		sopts.SetConfig(config)
 	}
 
-	var app *cltest.TestApplication
-	var cleanup func()
 	l := config.CreateProductionLogger().With("testname", t.Name())
 	sopts.FlagsAndDeps = append(sopts.FlagsAndDeps, l)
-	app, cleanup = cltest.NewApplicationWithConfigAndKey(t, config, sopts.FlagsAndDeps...)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationWithConfigAndKey(t, config, sopts.FlagsAndDeps...)
 	app.Logger = l
-	app.Logger.SetDB(app.GetStore().DB)
+	app.Logger.SetDB(app.GetDB())
 
 	require.NoError(t, app.Start())
 
@@ -167,8 +165,8 @@ func TestClient_CreateExternalInitiator(t *testing.T) {
 			err := client.CreateExternalInitiator(c)
 			require.NoError(t, err)
 
-			var exi models.ExternalInitiator
-			err = app.Store.RawDBWithAdvisoryLock(func(db *gorm.DB) error {
+			var exi bridges.ExternalInitiator
+			err = app.GetStore().RawDBWithAdvisoryLock(func(db *gorm.DB) error {
 				return db.Where("name = ?", test.args[0]).Find(&exi).Error
 			})
 			require.NoError(t, err)
@@ -198,7 +196,7 @@ func TestClient_CreateExternalInitiator_Errors(t *testing.T) {
 			app := startNewApplication(t)
 			client, _ := app.NewClientAndRenderer()
 
-			initialExis := len(cltest.AllExternalInitiators(t, app.Store))
+			initialExis := len(cltest.AllExternalInitiators(t, app.GetDB()))
 
 			set := flag.NewFlagSet("create", 0)
 			assert.NoError(t, set.Parse(test.args))
@@ -207,7 +205,7 @@ func TestClient_CreateExternalInitiator_Errors(t *testing.T) {
 			err := client.CreateExternalInitiator(c)
 			assert.Error(t, err)
 
-			exis := cltest.AllExternalInitiators(t, app.Store)
+			exis := cltest.AllExternalInitiators(t, app.GetDB())
 			assert.Len(t, exis, initialExis)
 		})
 	}
@@ -220,11 +218,11 @@ func TestClient_DestroyExternalInitiator(t *testing.T) {
 	client, r := app.NewClientAndRenderer()
 
 	token := auth.NewToken()
-	exi, err := models.NewExternalInitiator(token,
-		&models.ExternalInitiatorRequest{Name: "name"},
+	exi, err := bridges.NewExternalInitiator(token,
+		&bridges.ExternalInitiatorRequest{Name: "name"},
 	)
 	require.NoError(t, err)
-	err = app.Store.CreateExternalInitiator(exi)
+	err = app.BridgeORM().CreateExternalInitiator(exi)
 	require.NoError(t, err)
 
 	set := flag.NewFlagSet("test", 0)
@@ -425,9 +423,9 @@ func TestClient_RunOCRJob_HappyPath(t *testing.T) {
 	app.KeyStore.P2P().Add(cltest.DefaultP2PKey)
 
 	_, bridge := cltest.NewBridgeType(t, "voter_turnout", "http://blah.com")
-	require.NoError(t, app.Store.DB.Create(bridge).Error)
+	require.NoError(t, app.GetDB().Create(bridge).Error)
 	_, bridge2 := cltest.NewBridgeType(t, "election_winner", "http://blah.com")
-	require.NoError(t, app.Store.DB.Create(bridge2).Error)
+	require.NoError(t, app.GetDB().Create(bridge2).Error)
 
 	var ocrJobSpecFromFile job.Job
 	tree, err := toml.LoadFile("../testdata/tomlspecs/oracle-spec.toml")
@@ -484,9 +482,9 @@ func TestClient_AutoLogin(t *testing.T) {
 	app := startNewApplication(t)
 
 	user := cltest.MustRandomUser()
-	require.NoError(t, app.Store.SaveUser(&user))
+	require.NoError(t, app.SessionORM().CreateUser(&user))
 
-	sr := models.SessionRequest{
+	sr := sessions.SessionRequest{
 		Email:    user.Email,
 		Password: cltest.Password,
 	}
@@ -499,7 +497,7 @@ func TestClient_AutoLogin(t *testing.T) {
 	require.NoError(t, err)
 
 	// Expire the session and then try again
-	require.NoError(t, app.GetStore().ORM.DB.Exec("delete from sessions;").Error)
+	require.NoError(t, app.GetDB().Exec("delete from sessions;").Error)
 	err = client.ListJobsV2(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
 }
@@ -510,9 +508,9 @@ func TestClient_AutoLogin_AuthFails(t *testing.T) {
 	app := startNewApplication(t)
 
 	user := cltest.MustRandomUser()
-	require.NoError(t, app.Store.SaveUser(&user))
+	require.NoError(t, app.SessionORM().CreateUser(&user))
 
-	sr := models.SessionRequest{
+	sr := sessions.SessionRequest{
 		Email:    user.Email,
 		Password: cltest.Password,
 	}
@@ -532,7 +530,7 @@ func (FailingAuthenticator) Cookie() (*http.Cookie, error) {
 }
 
 // Authenticate retrieves a session ID via a cookie and saves it to disk.
-func (FailingAuthenticator) Authenticate(sessionRequest models.SessionRequest) (*http.Cookie, error) {
+func (FailingAuthenticator) Authenticate(sessionRequest sessions.SessionRequest) (*http.Cookie, error) {
 	return nil, errors.New("no luck")
 }
 

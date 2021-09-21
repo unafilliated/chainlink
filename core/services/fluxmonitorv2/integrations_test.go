@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/onsi/gomega"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/flags_wrapper"
 	faw "github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/flux_aggregator_wrapper"
@@ -201,7 +202,7 @@ func (fau fluxAggregatorUniverse) WatchSubmissionReceived(t *testing.T, addresse
 	return submissionReceived
 }
 
-func setupApplication(
+func startApplication(
 	t *testing.T,
 	fa fluxAggregatorUniverse,
 	setConfig func(cfg *configtest.TestGeneralConfig),
@@ -209,9 +210,8 @@ func setupApplication(
 	config := cltest.NewTestGeneralConfig(t)
 	setConfig(config)
 
-	app, cleanup := cltest.NewApplicationWithConfigAndKeyOnSimulatedBlockchain(t, config, fa.backend, fa.key)
-	t.Cleanup(cleanup)
-
+	app := cltest.NewApplicationWithConfigAndKeyOnSimulatedBlockchain(t, config, fa.backend, fa.key)
+	require.NoError(t, app.Start())
 	return app
 }
 
@@ -374,10 +374,16 @@ func assertNoSubmission(t *testing.T,
 	duration time.Duration,
 	msg string,
 ) {
+
+	// drain the channel
+	for len(submissionReceived) > 0 {
+		<-submissionReceived
+	}
+
 	select {
 	case <-submissionReceived:
-		assert.Fail(t, "flags are up, but submission was sent")
-	case <-time.After(2 * time.Second):
+		assert.Fail(t, "flags are up, but submission was sent", msg)
+	case <-time.After(duration):
 	}
 }
 
@@ -409,10 +415,11 @@ func checkLogWasConsumed(t *testing.T, fa fluxAggregatorUniverse, db *gorm.DB, p
 		consumed, err := log.NewORM(db, fa.evmChainID).WasBroadcastConsumed(db, block.Hash(), 0, pipelineSpecID)
 		require.NoError(t, err)
 		return consumed
-	}, 5*time.Second).Should(gomega.BeTrue())
+	}, cltest.DefaultWaitTimeout).Should(gomega.BeTrue())
 }
 
 func TestFluxMonitor_Deviation(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
 	fa := setupFluxAggregatorUniverse(t)
 
 	// - add oracles
@@ -423,11 +430,10 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 	checkOraclesAdded(t, fa, oracleList)
 
 	// Set up chainlink app
-	app := setupApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
+	app := startApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
 		cfg.Overrides.SetDefaultHTTPTimeout(100 * time.Millisecond)
 		cfg.Overrides.SetTriggerFallbackDBPollInterval(1 * time.Second)
 	})
-	require.NoError(t, app.Start())
 
 	type k struct{ latestAnswer, updatedAt string }
 	expectedMeta := map[k]int{}
@@ -438,7 +444,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 		func(r *http.Request) {
 			b, err1 := ioutil.ReadAll(r.Body)
 			require.NoError(t, err1)
-			var m models.BridgeMetaDataJSON
+			var m bridges.BridgeMetaDataJSON
 			require.NoError(t, json.Unmarshal(b, &m))
 			if m.Meta.LatestAnswer != nil && m.Meta.UpdatedAt != nil {
 				key := k{m.Meta.LatestAnswer.String(), m.Meta.UpdatedAt.String()}
@@ -448,7 +454,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 	)
 	t.Cleanup(mockServer.Close)
 	u, _ := url.Parse(mockServer.URL)
-	app.Store.CreateBridgeType(&models.BridgeType{
+	app.BridgeORM().CreateBridgeType(&bridges.BridgeType{
 		Name: "bridge",
 		URL:  models.WebURL(*u),
 	})
@@ -496,10 +502,10 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 
 	// Waiting for flux monitor to finish Register process in log broadcaster
 	// and then to have log broadcaster backfill logs after the debounceResubscribe period of ~ 1 sec
-	assert.Eventually(t, func() bool {
+	g.Eventually(func() uint32 {
 		lb := evmtest.MustGetDefaultChain(t, app.GetChainSet()).LogBroadcaster()
-		return lb.(log.BroadcasterInTest).TrackedAddressesCount() >= 1
-	}, 3*time.Second, 200*time.Millisecond)
+		return lb.(log.BroadcasterInTest).TrackedAddressesCount()
+	}, cltest.DefaultWaitTimeout, 200*time.Millisecond).Should(gomega.BeNumerically(">=", 1))
 
 	// Initial Poll
 	receiptBlock, answer := awaitSubmission(t, submissionReceived)
@@ -521,7 +527,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 		initialBalance,
 		receiptBlock,
 	)
-	assertPipelineRunCreated(t, app.Store.DB, 1, float64(100))
+	assertPipelineRunCreated(t, app.GetDB(), 1, float64(100))
 
 	// make sure the log is sent from LogBroadcaster
 	fa.backend.Commit()
@@ -530,7 +536,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 	// Need to wait until NewRound log is consumed - otherwise there is a chance
 	// it will arrive after the next answer is submitted, and cause
 	// DeleteFluxMonitorRoundsBackThrough to delete previous stats
-	checkLogWasConsumed(t, fa, app.Store.DB, int32(jobId), 5)
+	checkLogWasConsumed(t, fa, app.GetDB(), int32(jobId), 5)
 
 	logger.Info("Updating price to 103")
 	// Change reported price to a value outside the deviation
@@ -554,7 +560,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 		initialBalance-fee,
 		receiptBlock,
 	)
-	assertPipelineRunCreated(t, app.Store.DB, 2, float64(103))
+	assertPipelineRunCreated(t, app.GetDB(), 2, float64(103))
 
 	stopMining := cltest.Mine(fa.backend, time.Second)
 	defer stopMining()
@@ -562,7 +568,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 	// Need to wait until NewRound log is consumed - otherwise there is a chance
 	// it will arrive after the next answer is submitted, and cause
 	// DeleteFluxMonitorRoundsBackThrough to delete previous stats
-	checkLogWasConsumed(t, fa, app.Store.DB, int32(jobId), 8)
+	checkLogWasConsumed(t, fa, app.GetDB(), int32(jobId), 8)
 
 	// Should not received a submission as it is inside the deviation
 	reportPrice.Store(104)
@@ -574,6 +580,7 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 }
 
 func TestFluxMonitor_NewRound(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
 	fa := setupFluxAggregatorUniverse(t)
 
 	// - add oracles
@@ -584,12 +591,11 @@ func TestFluxMonitor_NewRound(t *testing.T) {
 	checkOraclesAdded(t, fa, oracleList)
 
 	// Set up chainlink app
-	app := setupApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
+	app := startApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
 		cfg.Overrides.SetDefaultHTTPTimeout(100 * time.Millisecond)
 		cfg.Overrides.SetTriggerFallbackDBPollInterval(1 * time.Second)
 		cfg.Overrides.GlobalFlagsContractAddress = null.StringFrom(fa.flagsContractAddress.Hex())
 	})
-	require.NoError(t, app.Start())
 
 	initialBalance := currentBalance(t, &fa).Int64()
 
@@ -644,10 +650,10 @@ ds1 -> ds1_parse
 
 	// Waiting for flux monitor to finish Register process in log broadcaster
 	// and then to have log broadcaster backfill logs after the debounceResubscribe period of ~ 1 sec
-	assert.Eventually(t, func() bool {
+	g.Eventually(func() uint32 {
 		lb := evmtest.MustGetDefaultChain(t, app.GetChainSet()).LogBroadcaster()
-		return lb.(log.BroadcasterInTest).TrackedAddressesCount() >= 2
-	}, 3*time.Second, 200*time.Millisecond)
+		return lb.(log.BroadcasterInTest).TrackedAddressesCount()
+	}, cltest.DefaultWaitTimeout, 200*time.Millisecond).Should(gomega.BeNumerically(">=", 2))
 
 	// Have the the fake node start a new round
 	submitAnswer(t, answerParams{
@@ -680,6 +686,7 @@ ds1 -> ds1_parse
 }
 
 func TestFluxMonitor_HibernationMode(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
 	fa := setupFluxAggregatorUniverse(t)
 
 	// - add oracles
@@ -689,13 +696,12 @@ func TestFluxMonitor_HibernationMode(t *testing.T) {
 	fa.backend.Commit()
 	checkOraclesAdded(t, fa, oracleList)
 
-	// Set up chainlink app
-	app := setupApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
+	// Start chainlink app
+	app := startApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
 		cfg.Overrides.SetDefaultHTTPTimeout(100 * time.Millisecond)
 		cfg.Overrides.SetTriggerFallbackDBPollInterval(1 * time.Second)
 		cfg.Overrides.GlobalFlagsContractAddress = null.StringFrom(fa.flagsContractAddress.Hex())
 	})
-	require.NoError(t, app.Start())
 
 	// Create mock server
 	reportPrice := atomic.NewInt64(1)
@@ -748,7 +754,7 @@ ds1 -> ds1_parse
 
 	// node doesn't submit initial response, because flag is up
 	// Wait here so the next lower flags doesn't trigger immediately
-	cltest.AssertPipelineRunsStays(t, j.PipelineSpec.ID, app.Store, 0)
+	cltest.AssertPipelineRunsStays(t, j.PipelineSpec.ID, app.GetDB(), 0)
 
 	// lower global kill switch flag - should trigger job run
 	fa.flagsContract.LowerFlags(fa.sergey, []common.Address{utils.ZeroAddress})
@@ -773,12 +779,12 @@ ds1 -> ds1_parse
 	fa.backend.Commit()
 
 	// wait for FM to receive flags raised logs
-	assert.Eventually(t, func() bool {
+	g.Eventually(func() int {
 		ilogs, err := fa.flagsContract.FilterFlagRaised(nil, []common.Address{})
 		require.NoError(t, err)
 		logs := cltest.GetLogs(t, nil, ilogs)
-		return len(logs) == 4
-	}, 7*time.Second, 100*time.Millisecond)
+		return len(logs)
+	}, cltest.DefaultWaitTimeout, 100*time.Millisecond).Should(gomega.Equal(4))
 
 	// change in price should not trigger run
 	reportPrice.Store(8)
@@ -798,13 +804,12 @@ func TestFluxMonitor_InvalidSubmission(t *testing.T) {
 	fa.backend.Commit()
 
 	// Set up chainlink app
-	app := setupApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
+	app := startApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
 		cfg.Overrides.SetDefaultHTTPTimeout(100 * time.Millisecond)
 		cfg.Overrides.SetTriggerFallbackDBPollInterval(1 * time.Second)
 		cfg.Overrides.GlobalMinRequiredOutgoingConfirmations = null.IntFrom(2)
 		cfg.Overrides.GlobalEvmHeadTrackerMaxBufferSize = null.IntFrom(100)
 	})
-	require.NoError(t, app.Start())
 
 	// Report a price that is above the maximum allowed value,
 	// causing it to revert.
@@ -858,7 +863,7 @@ ds1 -> ds1_parse
 	jobID, err := strconv.ParseInt(j.ID, 10, 32)
 	require.NoError(t, err)
 
-	jse := cltest.WaitForSpecErrorV2(t, app.Store, int32(jobID), 1)
+	jse := cltest.WaitForSpecErrorV2(t, app.GetDB(), int32(jobID), 1)
 	assert.Contains(t, jse[0].Description, "Answer is outside acceptable range")
 }
 
@@ -874,11 +879,10 @@ func TestFluxMonitorAntiSpamLogic(t *testing.T) {
 	checkOraclesAdded(t, fa, oracleList)
 
 	// Set up chainlink app
-	app := setupApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
+	app := startApplication(t, fa, func(cfg *configtest.TestGeneralConfig) {
 		cfg.Overrides.SetDefaultHTTPTimeout(100 * time.Millisecond)
 		cfg.Overrides.SetTriggerFallbackDBPollInterval(1 * time.Second)
 	})
-	require.NoError(t, app.Start())
 
 	answer := int64(1) // Answer the nodes give on the first round
 
