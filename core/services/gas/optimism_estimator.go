@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/store/models"
+	"github.com/smartcontractkit/chainlink/core/services/eth"
 	"github.com/smartcontractkit/chainlink/core/utils"
 	"github.com/tidwall/gjson"
 	"go.uber.org/multierr"
@@ -33,7 +33,7 @@ type optimismEstimator struct {
 	config     Config
 	client     optimismRPCClient
 	pollPeriod time.Duration
-	logger     *logger.Logger
+	logger     logger.Logger
 
 	gasPriceMu sync.RWMutex
 	l1GasPrice *big.Int
@@ -46,7 +46,7 @@ type optimismEstimator struct {
 }
 
 // NewOptimismEstimator returns a new optimism estimator
-func NewOptimismEstimator(lggr *logger.Logger, config Config, client optimismRPCClient) Estimator {
+func NewOptimismEstimator(lggr logger.Logger, config Config, client optimismRPCClient) Estimator {
 	return &optimismEstimator{
 		utils.StartStopOnce{},
 		config,
@@ -134,7 +134,7 @@ func (o *optimismEstimator) refreshPrices() (t *time.Timer) {
 	return
 }
 
-func (o *optimismEstimator) EstimateGas(calldata []byte, gasLimit uint64, opts ...Opt) (gasPrice *big.Int, chainSpecificGasLimit uint64, err error) {
+func (o *optimismEstimator) GetLegacyGas(calldata []byte, gasLimit uint64, opts ...Opt) (gasPrice *big.Int, chainSpecificGasLimit uint64, err error) {
 	ok := o.IfStarted(func() {
 		var forceRefetch bool
 		for _, opt := range opts {
@@ -160,11 +160,21 @@ func (o *optimismEstimator) EstimateGas(calldata []byte, gasLimit uint64, opts .
 	return
 }
 
-func (o *optimismEstimator) BumpGas(originalGasPrice *big.Int, originalGasLimit uint64) (gasPrice *big.Int, gasLimit uint64, err error) {
+func (o *optimismEstimator) BumpLegacyGas(originalGasPrice *big.Int, originalGasLimit uint64) (gasPrice *big.Int, gasLimit uint64, err error) {
 	return nil, 0, errors.New("bump gas is not supported for optimism")
 }
 
-func (o *optimismEstimator) OnNewLongestChain(_ context.Context, _ models.Head) {}
+func (o *optimismEstimator) OnNewLongestChain(_ context.Context, _ eth.Head) {}
+
+func (*optimismEstimator) GetDynamicFee(gasLimit uint64) (fee DynamicFee, chainSpecificGasLimit uint64, err error) {
+	err = errors.New("dynamic fees are not implemented for Optimism")
+	return
+}
+
+func (o *optimismEstimator) BumpDynamicFee(original DynamicFee, gasLimit uint64) (bumped DynamicFee, chainSpecificGasLimit uint64, err error) {
+	err = errors.New("dynamic fees are not implemented for Optimism")
+	return
+}
 
 func (o *optimismEstimator) calcGas(calldata []byte, l2GasLimit uint64) (chainSpecificGasPrice *big.Int, chainSpecificGasLimit uint64, err error) {
 	l1GasPrice, l2GasPrice := o.getGasPrices()

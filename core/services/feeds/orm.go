@@ -6,14 +6,16 @@ import (
 	"time"
 
 	uuid "github.com/satori/go.uuid"
-	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"gorm.io/gorm"
+
+	"github.com/smartcontractkit/chainlink/core/services/postgres"
 )
 
 //go:generate mockery --name ORM --output ./mocks/ --case=underscore
 
 type ORM interface {
 	ApproveJobProposal(ctx context.Context, id int64, externalJobID uuid.UUID, status JobProposalStatus) error
+	CancelJobProposal(ctx context.Context, id int64) error
 	CountJobProposals(ctx context.Context) (int64, error)
 	CountManagers(ctx context.Context) (int64, error)
 	CreateJobProposal(ctx context.Context, jp *JobProposal) (int64, error)
@@ -21,6 +23,7 @@ type ORM interface {
 	GetJobProposal(ctx context.Context, id int64) (*JobProposal, error)
 	GetJobProposalByRemoteUUID(ctx context.Context, uuid uuid.UUID) (*JobProposal, error)
 	GetManager(ctx context.Context, id int64) (*FeedsManager, error)
+	IsJobManaged(ctx context.Context, jobID int64) (bool, error)
 	ListJobProposals(ctx context.Context) ([]JobProposal, error)
 	ListManagers(ctx context.Context) ([]FeedsManager, error)
 	UpdateJobProposalSpec(ctx context.Context, id int64, spec string) error
@@ -48,7 +51,7 @@ func (o *orm) CreateManager(ctx context.Context, ms *FeedsManager) (int64, error
 INSERT INTO feeds_managers (name, uri, public_key, job_types, is_ocr_bootstrap_peer, ocr_bootstrap_peer_multiaddr, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
-	`
+`
 
 	row := o.db.WithContext(ctx).Raw(stmt,
 		ms.Name,
@@ -78,7 +81,7 @@ func (o *orm) ListManagers(ctx context.Context) ([]FeedsManager, error) {
 	stmt := `
 SELECT id, name, uri, public_key, job_types, is_ocr_bootstrap_peer, ocr_bootstrap_peer_multiaddr, created_at, updated_at
 FROM feeds_managers;
-	`
+`
 
 	err := o.db.WithContext(ctx).Raw(stmt).Scan(&mgrs).Error
 	if err != nil {
@@ -94,7 +97,7 @@ func (o *orm) GetManager(ctx context.Context, id int64) (*FeedsManager, error) {
 SELECT id, name, uri, public_key, job_types, is_ocr_bootstrap_peer, ocr_bootstrap_peer_multiaddr, created_at, updated_at
 FROM feeds_managers
 WHERE id = ?;
-	`
+`
 
 	mgr := FeedsManager{}
 	result := o.db.WithContext(ctx).Raw(stmt, id).Scan(&mgr)
@@ -122,7 +125,7 @@ SET name = ?,
 	ocr_bootstrap_peer_multiaddr = ?,
 	updated_at = ?
 WHERE id = ?;
-	`
+`
 
 	result := tx.Exec(stmt, mgr.Name, mgr.URI, mgr.PublicKey, mgr.JobTypes, mgr.IsOCRBootstrapPeer, mgr.OCRBootstrapPeerMultiaddr, now, mgr.ID)
 	if result.RowsAffected == 0 {
@@ -158,12 +161,12 @@ func (o *orm) CreateJobProposal(ctx context.Context, jp *JobProposal) (int64, er
 	now := time.Now()
 
 	stmt := `
-INSERT INTO job_proposals (remote_uuid, spec, status, feeds_manager_id, multiaddrs, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO job_proposals (remote_uuid, spec, status, feeds_manager_id, multiaddrs, proposed_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
-	`
+`
 
-	row := o.db.WithContext(ctx).Raw(stmt, jp.RemoteUUID, jp.Spec, jp.Status, jp.FeedsManagerID, jp.Multiaddrs, now, now).Row()
+	row := o.db.WithContext(ctx).Raw(stmt, jp.RemoteUUID, jp.Spec, jp.Status, jp.FeedsManagerID, jp.Multiaddrs, now, now, now).Row()
 	if row.Err() != nil {
 		return id, row.Err()
 	}
@@ -184,20 +187,21 @@ func (o *orm) UpsertJobProposal(ctx context.Context, jp *JobProposal) (int64, er
 	now := time.Now()
 
 	stmt := `
-INSERT INTO job_proposals (remote_uuid, spec, status, feeds_manager_id, multiaddrs, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO job_proposals (remote_uuid, spec, status, feeds_manager_id, multiaddrs, proposed_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (remote_uuid)
 DO
 	UPDATE SET
 		spec = excluded.spec,
 		status = excluded.status,
 		multiaddrs = excluded.multiaddrs,
+		proposed_at = excluded.proposed_at,
 		updated_at = excluded.updated_at
 RETURNING id;
 `
 
 	row := o.db.WithContext(ctx).Raw(stmt,
-		jp.RemoteUUID, jp.Spec, jp.Status, jp.FeedsManagerID, jp.Multiaddrs, now, now,
+		jp.RemoteUUID, jp.Spec, jp.Status, jp.FeedsManagerID, jp.Multiaddrs, now, now, now,
 	).Row()
 	if row.Err() != nil {
 		return id, row.Err()
@@ -211,9 +215,9 @@ RETURNING id;
 func (o *orm) ListJobProposals(ctx context.Context) ([]JobProposal, error) {
 	jps := []JobProposal{}
 	stmt := `
-SELECT remote_uuid, id, spec, status, external_job_id, feeds_manager_id, multiaddrs, created_at, updated_at
+SELECT remote_uuid, id, spec, status, external_job_id, feeds_manager_id, multiaddrs, proposed_at, created_at, updated_at
 FROM job_proposals;
-	`
+`
 
 	err := o.db.WithContext(ctx).Raw(stmt).Scan(&jps).Error
 	if err != nil {
@@ -226,10 +230,10 @@ FROM job_proposals;
 // GetJobProposal gets a job proposal by id
 func (o *orm) GetJobProposal(ctx context.Context, id int64) (*JobProposal, error) {
 	stmt := `
-SELECT id, remote_uuid, spec, status, external_job_id, feeds_manager_id, multiaddrs, created_at, updated_at
+SELECT id, remote_uuid, spec, status, external_job_id, feeds_manager_id, multiaddrs, proposed_at, created_at, updated_at
 FROM job_proposals
 WHERE id = ?;
-	`
+`
 
 	return o.getJobProposal(ctx, stmt, id)
 }
@@ -237,10 +241,10 @@ WHERE id = ?;
 // GetJobProposalByRemoteUUID gets a job proposal by the remote FMS uuid
 func (o *orm) GetJobProposalByRemoteUUID(ctx context.Context, id uuid.UUID) (*JobProposal, error) {
 	stmt := `
-		SELECT id, remote_uuid, spec, status, external_job_id, feeds_manager_id, multiaddrs, created_at, updated_at
-		FROM job_proposals
-		WHERE remote_uuid = ?;
-	`
+SELECT id, remote_uuid, spec, status, external_job_id, feeds_manager_id, multiaddrs, proposed_at, created_at, updated_at
+FROM job_proposals
+WHERE remote_uuid = ?;
+`
 
 	return o.getJobProposal(ctx, stmt, id)
 }
@@ -270,7 +274,7 @@ UPDATE job_proposals
 SET status = ?,
 	updated_at = ?
 WHERE id = ?;
-	`
+`
 
 	result := tx.Exec(stmt, status, now, id)
 	if result.RowsAffected == 0 {
@@ -286,7 +290,6 @@ WHERE id = ?;
 // UpdateJobProposalSpec updates the spec of a job proposal by id.
 func (o *orm) UpdateJobProposalSpec(ctx context.Context, id int64, spec string) error {
 	tx := postgres.TxFromContext(ctx, o.db)
-
 	now := time.Now()
 
 	stmt := `
@@ -294,7 +297,7 @@ UPDATE job_proposals
 SET spec = ?,
 	updated_at = ?
 WHERE id = ?;
-	`
+`
 
 	result := tx.Exec(stmt, spec, now, id)
 	if result.RowsAffected == 0 {
@@ -310,7 +313,6 @@ WHERE id = ?;
 // ApproveJobProposal updates the job proposal as approved.
 func (o *orm) ApproveJobProposal(ctx context.Context, id int64, externalJobID uuid.UUID, status JobProposalStatus) error {
 	tx := postgres.TxFromContext(ctx, o.db)
-
 	now := time.Now()
 
 	stmt := `
@@ -319,9 +321,32 @@ SET status = ?,
 	external_job_id = ?,
 	updated_at = ?
 WHERE id = ?;
-	`
+`
 
 	result := tx.Exec(stmt, status, externalJobID, now, id)
+	if result.RowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	if result.Error != nil {
+		return result.Error
+	}
+
+	return nil
+}
+
+// CancelJobProposal cancels a job proposal.
+func (o *orm) CancelJobProposal(ctx context.Context, id int64) error {
+	tx := postgres.TxFromContext(ctx, o.db)
+	now := time.Now()
+	stmt := `
+UPDATE job_proposals
+SET status = ?,
+	external_job_id = ?,
+	updated_at = ?
+WHERE id = ?;
+`
+
+	result := tx.Exec(stmt, JobProposalStatusCancelled, nil, now, id)
 	if result.RowsAffected == 0 {
 		return sql.ErrNoRows
 	}
@@ -338,7 +363,7 @@ func (o *orm) CountJobProposals(ctx context.Context) (int64, error) {
 	stmt := `
 SELECT COUNT(*)
 FROM job_proposals
-	`
+`
 
 	err := o.db.WithContext(ctx).Raw(stmt).Scan(&count).Error
 	if err != nil {
@@ -346,4 +371,21 @@ FROM job_proposals
 	}
 
 	return count, nil
+}
+
+// IsJobManaged determines if a job is managed by the feeds manager.
+func (o *orm) IsJobManaged(ctx context.Context, jobID int64) (bool, error) {
+	stmt := `
+SELECT exists (
+	SELECT 1
+	FROM job_proposals
+	INNER JOIN jobs ON job_proposals.external_job_id = jobs.external_job_id
+	WHERE jobs.id = ?
+);
+`
+
+	var exists bool
+	err := o.db.WithContext(ctx).Raw(stmt, jobID).Scan(&exists).Error
+
+	return exists, err
 }

@@ -1,11 +1,15 @@
 package keystore
 
 import (
+	"context"
 	"fmt"
+	"math/big"
 	"reflect"
 	"sync"
 
 	"github.com/pkg/errors"
+	"gorm.io/gorm"
+
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/csakey"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
@@ -14,7 +18,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/vrfkey"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/utils"
-	"gorm.io/gorm"
 )
 
 var ErrLocked = errors.New("Keystore is locked")
@@ -26,17 +29,17 @@ type Master interface {
 	P2P() P2P
 	VRF() VRF
 	Unlock(password string) error
-	Migrate(vrfPassword string) error
+	Migrate(vrfPassword string, chainID *big.Int) error
 	IsEmpty() (bool, error)
 }
 
 type master struct {
 	*keyManager
-	csa csa
-	eth eth
-	ocr ocr
-	p2p p2p
-	vrf vrf
+	csa *csa
+	eth *eth
+	ocr *ocr
+	p2p *p2p
+	vrf *vrf
 }
 
 func New(db *gorm.DB, scryptParams utils.ScryptParams) Master {
@@ -89,7 +92,7 @@ func (ks *master) IsEmpty() (bool, error) {
 	return count == 0, nil
 }
 
-func (ks *master) Migrate(vrfPssword string) error {
+func (ks *master) Migrate(vrfPssword string, chainID *big.Int) error {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -142,7 +145,7 @@ func (ks *master) Migrate(vrfPssword string) error {
 	if err = ks.keyManager.save(); err != nil {
 		return err
 	}
-	ethKeys, states, err := ks.eth.GetV1KeysAsV2()
+	ethKeys, states, err := ks.eth.GetV1KeysAsV2(chainID)
 	if err != nil {
 		return err
 	}
@@ -150,7 +153,7 @@ func (ks *master) Migrate(vrfPssword string) error {
 		if _, exists := ks.keyRing.Eth[ethKey.ID()]; exists {
 			continue
 		}
-		logger.Debugf("Migrating Eth key %s", ethKey.ID())
+		logger.Debugf("Migrating Eth key %s (and pegging to default chain ID %s)", ethKey.ID(), chainID.String())
 		if err = ks.eth.addEthKeyWithState(ethKey, states[idx]); err != nil {
 			return err
 		}
@@ -210,7 +213,8 @@ func (km *keyManager) save(callbacks ...func(*gorm.DB) error) error {
 	if err != nil {
 		return errors.Wrap(err, "unable to encrypt keyRing")
 	}
-	return postgres.GormTransactionWithDefaultContext(km.orm.db, func(tx *gorm.DB) error {
+	return postgres.NewGormTransactionManager(km.orm.db).Transact(func(ctx context.Context) error {
+		tx := postgres.TxFromContext(ctx, km.orm.db)
 		err := NewORM(tx).saveEncryptedKeyRing(&ekb)
 		if err != nil {
 			return err
@@ -286,7 +290,7 @@ func getFieldNameForKey(unknownKey Key) (string, error) {
 	case vrfkey.KeyV2:
 		return "VRF", nil
 	}
-	return "", fmt.Errorf("Unknown key type: %T", unknownKey)
+	return "", fmt.Errorf("unknown key type: %T", unknownKey)
 }
 
 type Key interface {

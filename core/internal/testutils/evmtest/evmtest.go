@@ -36,7 +36,7 @@ type TestChainOpts struct {
 	DB             *gorm.DB
 	TxManager      bulletprooftxmanager.TxManager
 	KeyStore       keystore.Eth
-	Logger         *logger.Logger
+	Logger         logger.Logger
 }
 
 func NewChainScopedConfig(t testing.TB, cfg config.GeneralConfig) evmconfig.ChainScopedConfig {
@@ -52,7 +52,6 @@ func NewChainSet(t testing.TB, testopts TestChainOpts) evm.ChainSet {
 		SQLxDB:           postgres.TryUnwrapGormDB(testopts.DB),
 		KeyStore:         testopts.KeyStore,
 		EventBroadcaster: postgres.NewNullEventBroadcaster(),
-		AdvisoryLocker:   postgres.NewNullAdvisoryLocker(),
 	}
 	if testopts.Client != nil {
 		opts.GenEthClient = func(c evmtypes.Chain) eth.Client {
@@ -140,7 +139,15 @@ func (mo *MockORM) Clear(chainID *big.Int, key string) error {
 	return nil
 }
 
+func (mo *MockORM) Chain(id utils.Big) (evmtypes.Chain, error) {
+	panic("not implemented")
+}
+
 func (mo *MockORM) CreateChain(id utils.Big, config evmtypes.ChainCfg) (evmtypes.Chain, error) {
+	panic("not implemented")
+}
+
+func (mo *MockORM) UpdateChain(id utils.Big, enabled bool, config evmtypes.ChainCfg) (evmtypes.Chain, error) {
 	panic("not implemented")
 }
 

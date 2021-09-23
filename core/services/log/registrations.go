@@ -9,7 +9,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated"
 	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/store/models"
+	"github.com/smartcontractkit/chainlink/core/services/eth"
 )
 
 // 1. Each listener being registered can specify a custom NumConfirmations - number of block confirmations required for any log being sent to it.
@@ -33,7 +33,7 @@ type (
 	registrations struct {
 		subscribers map[uint64]*subscribers
 		decoders    map[common.Address]ParseLogFunc
-		logger      *logger.Logger
+		logger      logger.Logger
 		evmChainID  big.Int
 
 		// highest 'NumConfirmations' per all listeners, used to decide about deleting older logs if it's higher than EvmFinalityDepth
@@ -59,7 +59,7 @@ type (
 	}
 )
 
-func newRegistrations(logger *logger.Logger, evmChainID big.Int) *registrations {
+func newRegistrations(logger logger.Logger, evmChainID big.Int) *registrations {
 	return &registrations{
 		subscribers: make(map[uint64]*subscribers),
 		decoders:    make(map[common.Address]ParseLogFunc),
@@ -133,7 +133,7 @@ func (r *registrations) isAddressRegistered(address common.Address) bool {
 	return false
 }
 
-func (r *registrations) sendLogs(logsToSend []logsOnBlock, latestHead models.Head, broadcasts []LogBroadcast) {
+func (r *registrations) sendLogs(logsToSend []logsOnBlock, latestHead eth.Head, broadcasts []LogBroadcast) {
 	broadcastsExisting := make(map[LogBroadcastAsKey]struct{})
 	for _, b := range broadcasts {
 
@@ -256,10 +256,10 @@ func (r *subscribers) isAddressRegistered(address common.Address) bool {
 	return exists
 }
 
-func (r *subscribers) sendLog(log types.Log, latestHead models.Head,
+func (r *subscribers) sendLog(log types.Log, latestHead eth.Head,
 	broadcasts map[LogBroadcastAsKey]struct{},
 	decoders map[common.Address]ParseLogFunc,
-	logger *logger.Logger) {
+	logger logger.Logger) {
 
 	latestBlockNumber := uint64(latestHead.Number)
 	var wg sync.WaitGroup

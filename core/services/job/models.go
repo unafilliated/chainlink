@@ -6,20 +6,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smartcontractkit/chainlink/core/utils"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/lib/pq"
 	uuid "github.com/satori/go.uuid"
+	"gopkg.in/guregu/null.v4"
+	"gorm.io/gorm"
+
 	"github.com/smartcontractkit/chainlink/core/assets"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	clnull "github.com/smartcontractkit/chainlink/core/null"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/p2pkey"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/core/services/signatures/secp256k1"
 	"github.com/smartcontractkit/chainlink/core/store/models"
-	"gopkg.in/guregu/null.v4"
-	"gorm.io/gorm"
+	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 const (
@@ -47,13 +48,17 @@ func (t Type) SupportsAsync() bool {
 	return supportsAsync[t]
 }
 
+func (t Type) SchemaVersion() uint32 {
+	return schemaVersions[t]
+}
+
 var (
 	requiresPipelineSpec = map[Type]bool{
 		Cron:              true,
 		DirectRequest:     true,
 		FluxMonitor:       true,
 		OffchainReporting: false, // bootstrap jobs do not require it
-		Keeper:            false,
+		Keeper:            true,
 		VRF:               true,
 		Webhook:           true,
 	}
@@ -62,9 +67,18 @@ var (
 		DirectRequest:     true,
 		FluxMonitor:       false,
 		OffchainReporting: false,
-		Keeper:            false,
+		Keeper:            true,
 		VRF:               true,
 		Webhook:           true,
+	}
+	schemaVersions = map[Type]uint32{
+		Cron:              1,
+		DirectRequest:     1,
+		FluxMonitor:       1,
+		OffchainReporting: 1,
+		Keeper:            2,
+		VRF:               1,
+		Webhook:           1,
 	}
 )
 
@@ -211,7 +225,7 @@ func (OffchainReportingOracleSpec) TableName() string {
 
 type ExternalInitiatorWebhookSpec struct {
 	ExternalInitiatorID int64
-	ExternalInitiator   models.ExternalInitiator `gorm:"foreignkey:ExternalInitiatorID;->"`
+	ExternalInitiator   bridges.ExternalInitiator `gorm:"foreignkey:ExternalInitiatorID;->"`
 	WebhookSpecID       int32
 	WebhookSpec         WebhookSpec `gorm:"foreignkey:WebhookSpecID;->"`
 	Spec                models.JSON

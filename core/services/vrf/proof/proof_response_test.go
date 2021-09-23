@@ -15,13 +15,13 @@ import (
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/solidity_vrf_verifier_wrapper"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestMarshaledProof(t *testing.T) {
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-	keyStore := cltest.NewKeyStore(t, store.DB)
+	db := pgtest.NewGormDB(t)
+	keyStore := cltest.NewKeyStore(t, db)
 	key := cltest.DefaultVRFKey
 	keyStore.VRF().Add(key)
 	blockHash := common.Hash{}

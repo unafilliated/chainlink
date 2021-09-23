@@ -57,6 +57,7 @@ type ConfigSchema struct {
 	EthereumSecondaryURLs                      string                        `env:"ETH_SECONDARY_URLS" default:""`
 	EthereumURL                                string                        `env:"ETH_URL" default:"ws://localhost:8546"`
 	EvmDefaultBatchSize                        uint32                        `env:"ETH_DEFAULT_BATCH_SIZE"`
+	EvmEIP1559DynamicFees                      bool                          `env:"EVM_EIP1559_DYNAMIC_FEES"`
 	EvmFinalityDepth                           uint32                        `env:"ETH_FINALITY_DEPTH"`
 	EvmGasBumpPercent                          uint16                        `env:"ETH_GAS_BUMP_PERCENT"`
 	EvmGasBumpThreshold                        uint64                        `env:"ETH_GAS_BUMP_THRESHOLD"`
@@ -66,6 +67,8 @@ type ConfigSchema struct {
 	EvmGasLimitMultiplier                      float32                       `env:"ETH_GAS_LIMIT_MULTIPLIER"`
 	EvmGasLimitTransfer                        uint64                        `env:"ETH_GAS_LIMIT_TRANSFER"`
 	EvmGasPriceDefault                         *big.Int                      `env:"ETH_GAS_PRICE_DEFAULT"`
+	EvmGasTipCapDefault                        *big.Int                      `env:"EVM_GAS_TIP_CAP_DEFAULT"`
+	EvmGasTipCapMinimum                        *big.Int                      `env:"EVM_GAS_TIP_CAP_MINIMUM"`
 	EvmHeadTrackerHistoryDepth                 uint                          `env:"ETH_HEAD_TRACKER_HISTORY_DEPTH"`
 	EvmHeadTrackerMaxBufferSize                uint                          `env:"ETH_HEAD_TRACKER_MAX_BUFFER_SIZE"`
 	EvmHeadTrackerSamplingInterval             time.Duration                 `env:"ETH_HEAD_TRACKER_SAMPLING_INTERVAL"`
@@ -80,13 +83,10 @@ type ConfigSchema struct {
 	ExplorerSecret                             string                        `env:"EXPLORER_SECRET"`
 	ExplorerURL                                *url.URL                      `env:"EXPLORER_URL"`
 	FMDefaultTransactionQueueDepth             uint32                        `env:"FM_DEFAULT_TRANSACTION_QUEUE_DEPTH" default:"1"`
-	FeatureCronV2                              bool                          `env:"FEATURE_CRON_V2" default:"true"`
 	FeatureExternalInitiators                  bool                          `env:"FEATURE_EXTERNAL_INITIATORS" default:"false"`
-	FeatureFluxMonitorV2                       bool                          `env:"FEATURE_FLUX_MONITOR_V2" default:"true"`
 	FeatureOffchainReporting                   bool                          `env:"FEATURE_OFFCHAIN_REPORTING" default:"false"`
 	FeatureUICSAKeys                           bool                          `env:"FEATURE_UI_CSA_KEYS" default:"false"`
 	FeatureUIFeedsManager                      bool                          `env:"FEATURE_UI_FEEDS_MANAGER" default:"false"`
-	FeatureWebhookV2                           bool                          `env:"FEATURE_WEBHOOK_V2" default:"false"`
 	FlagsContractAddress                       string                        `env:"FLAGS_CONTRACT_ADDRESS"`
 	GasEstimatorMode                           string                        `env:"GAS_ESTIMATOR_MODE"`
 	GlobalLockRetryInterval                    models.Duration               `env:"GLOBAL_LOCK_RETRY_INTERVAL" default:"1s"`
@@ -99,6 +99,8 @@ type ConfigSchema struct {
 	JobPipelineReaperThreshold                 time.Duration                 `env:"JOB_PIPELINE_REAPER_THRESHOLD" default:"24h"`
 	JobPipelineResultWriteQueueDepth           uint64                        `env:"JOB_PIPELINE_RESULT_WRITE_QUEUE_DEPTH" default:"100"`
 	KeeperDefaultTransactionQueueDepth         uint32                        `env:"KEEPER_DEFAULT_TRANSACTION_QUEUE_DEPTH" default:"1"`
+	KeeperGasPriceBufferPercent                uint32                        `env:"KEEPER_GAS_PRICE_BUFFER_PERCENT" default:"20"`
+	KeeperGasTipCapBufferPercent               uint32                        `env:"KEEPER_GAS_TIP_CAP_BUFFER_PERCENT" default:"20"`
 	KeeperMaximumGracePeriod                   int64                         `env:"KEEPER_MAXIMUM_GRACE_PERIOD" default:"100"`
 	KeeperMinimumRequiredConfirmations         uint64                        `env:"KEEPER_MINIMUM_REQUIRED_CONFIRMATIONS" default:"12"`
 	KeeperRegistryCheckGasOverhead             uint64                        `env:"KEEPER_REGISTRY_CHECK_GAS_OVERHEAD" default:"200000"`

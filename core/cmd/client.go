@@ -3,11 +3,13 @@ package cmd
 import (
 	"bytes"
 	"crypto/tls"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"path"
@@ -20,12 +22,14 @@ import (
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/core/services/keystore"
+	"github.com/smartcontractkit/chainlink/core/services/periodicbackup"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
+	"github.com/smartcontractkit/chainlink/core/services/versioning"
 	"github.com/smartcontractkit/chainlink/core/services/webhook"
-	"github.com/smartcontractkit/chainlink/core/store"
-	strpkg "github.com/smartcontractkit/chainlink/core/store"
+	"github.com/smartcontractkit/chainlink/core/sessions"
+	"github.com/smartcontractkit/chainlink/core/static"
 	"github.com/smartcontractkit/chainlink/core/store/config"
-	"github.com/smartcontractkit/chainlink/core/store/models"
+	"github.com/smartcontractkit/chainlink/core/store/migrate"
 	"github.com/smartcontractkit/chainlink/core/utils"
 	"github.com/smartcontractkit/chainlink/core/web"
 
@@ -76,24 +80,69 @@ type ChainlinkAppFactory struct{}
 
 // NewApplication returns a new instance of the node with the given config.
 func (n ChainlinkAppFactory) NewApplication(cfg config.GeneralConfig) (chainlink.Application, error) {
-	advisoryLocker := postgres.NewAdvisoryLock(cfg.DatabaseURL())
 	shutdownSignal := gracefulpanic.NewSignal()
-	// TODO: Remove store entirely
-	// https://app.clubhouse.io/chainlinklabs/story/12980/remove-store-object-entirely
-	store, err := strpkg.NewStore(cfg, advisoryLocker, shutdownSignal)
+	uri := cfg.DatabaseURL()
+	dialect := cfg.GetDatabaseDialectConfiguredOrDefault()
+	db, gormDB, err := postgres.NewConnection(uri.String(), string(dialect), postgres.Config{
+		LogSQLStatements: cfg.LogSQLStatements(),
+		MaxOpenConns:     cfg.ORMMaxOpenConns(),
+		MaxIdleConns:     cfg.ORMMaxIdleConns(),
+	})
 	if err != nil {
 		return nil, err
 	}
-	db := store.DB
-	sqlxDB := postgres.UnwrapGormDB(db)
-	cfg.SetDB(db)
-	keyStore := keystore.New(db, utils.GetScryptParams(cfg))
+	keyStore := keystore.New(gormDB, utils.GetScryptParams(cfg))
+	cfg.SetDB(gormDB)
+
+	// Set up the versioning ORM
+	verORM := versioning.NewORM(db)
+
+	// Set up periodic backup
+	if cfg.DatabaseBackupMode() != config.DatabaseBackupModeNone {
+		var version *versioning.NodeVersion
+		var versionString string
+
+		version, err = verORM.FindLatestNodeVersion()
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				logger.Default.Debugf("Failed to find any node version in the DB: %w", err)
+			} else if strings.Contains(err.Error(), "relation \"node_versions\" does not exist") {
+				logger.Default.Debugf("Failed to find any node version in the DB, the node_versions table does not exist yet: %w", err)
+			} else {
+				return nil, errors.Wrap(err, "initializeORM#FindLatestNodeVersion")
+			}
+		}
+
+		if version != nil {
+			versionString = version.Version
+		}
+
+		databaseBackup := periodicbackup.NewDatabaseBackup(cfg, logger.Default)
+		databaseBackup.RunBackupGracefully(versionString)
+	}
+
+	// Migrate the database
+	if cfg.MigrateDatabase() {
+		if err = migrate.Migrate(db.DB); err != nil {
+			return nil, errors.Wrap(err, "initializeORM#Migrate")
+		}
+	}
+
+	// Determine node version
+	nodeVersion := static.Version
+	if nodeVersion == "unset" {
+		nodeVersion = fmt.Sprintf("random_%d", rand.Uint32())
+	}
+	version := versioning.NewNodeVersion(nodeVersion)
+	if err = verORM.UpsertNodeVersion(version); err != nil {
+		return nil, errors.Wrap(err, "initializeORM#UpsertNodeVersion")
+	}
+
 	// Init service loggers
 	globalLogger := cfg.CreateProductionLogger()
-	globalLogger.SetDB(db)
 
 	if cfg.ClobberNodesFromEnv() {
-		if err = evm.ClobberNodesFromEnv(db, cfg); err != nil {
+		if err = evm.ClobberNodesFromEnv(gormDB, cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -102,24 +151,22 @@ func (n ChainlinkAppFactory) NewApplication(cfg config.GeneralConfig) (chainlink
 	ccOpts := evm.ChainSetOpts{
 		Config:           cfg,
 		Logger:           globalLogger,
-		GormDB:           db,
-		SQLxDB:           sqlxDB,
-		ORM:              evm.NewORM(sqlxDB),
+		GormDB:           gormDB,
+		SQLxDB:           db,
+		ORM:              evm.NewORM(db),
 		KeyStore:         keyStore.Eth(),
-		AdvisoryLocker:   advisoryLocker,
 		EventBroadcaster: eventBroadcaster,
 	}
 	chainSet, err := evm.LoadChainSet(ccOpts)
 	if err != nil {
 		logger.Fatal(err)
 	}
-	externalInitiatorManager := webhook.NewExternalInitiatorManager(db, utils.UnrestrictedClient)
+	externalInitiatorManager := webhook.NewExternalInitiatorManager(gormDB, utils.UnrestrictedClient)
 	return chainlink.NewApplication(chainlink.ApplicationOpts{
 		Config:                   cfg,
-		AdvisoryLocker:           advisoryLocker,
 		ShutdownSignal:           shutdownSignal,
-		Store:                    store,
-		GormDB:                   db,
+		GormDB:                   gormDB,
+		SqlxDB:                   db,
 		KeyStore:                 keyStore,
 		ChainSet:                 chainSet,
 		EventBroadcaster:         eventBroadcaster,
@@ -139,7 +186,7 @@ type ChainlinkRunner struct{}
 // Run sets the log level based on config and starts the web router to listen
 // for input and return data.
 func (n ChainlinkRunner) Run(app chainlink.Application) error {
-	config := app.GetStore().Config
+	config := app.GetConfig()
 	mode := gin.ReleaseMode
 	if config.Dev() && config.LogLevel().Level < zapcore.InfoLevel {
 		mode = gin.DebugMode
@@ -216,12 +263,12 @@ type authenticatedHTTPClient struct {
 	config         HTTPClientConfig
 	client         *http.Client
 	cookieAuth     CookieAuthenticator
-	sessionRequest models.SessionRequest
+	sessionRequest sessions.SessionRequest
 }
 
 // NewAuthenticatedHTTPClient uses the CookieAuthenticator to generate a sessionID
 // which is then used for all subsequent HTTP API requests.
-func NewAuthenticatedHTTPClient(config HTTPClientConfig, cookieAuth CookieAuthenticator, sessionRequest models.SessionRequest) HTTPClient {
+func NewAuthenticatedHTTPClient(config HTTPClientConfig, cookieAuth CookieAuthenticator, sessionRequest sessions.SessionRequest) HTTPClient {
 	return &authenticatedHTTPClient{
 		config:         config,
 		client:         newHttpClient(config),
@@ -315,7 +362,7 @@ func (h *authenticatedHTTPClient) doRequest(verb, path string, body io.Reader, h
 // future HTTP requests.
 type CookieAuthenticator interface {
 	Cookie() (*http.Cookie, error)
-	Authenticate(models.SessionRequest) (*http.Cookie, error)
+	Authenticate(sessions.SessionRequest) (*http.Cookie, error)
 }
 
 type SessionCookieAuthenticatorConfig interface {
@@ -342,7 +389,7 @@ func (t *SessionCookieAuthenticator) Cookie() (*http.Cookie, error) {
 }
 
 // Authenticate retrieves a session ID via a cookie and saves it to disk.
-func (t *SessionCookieAuthenticator) Authenticate(sessionRequest models.SessionRequest) (*http.Cookie, error) {
+func (t *SessionCookieAuthenticator) Authenticate(sessionRequest sessions.SessionRequest) (*http.Cookie, error) {
 	b := new(bytes.Buffer)
 	err := json.NewEncoder(b).Encode(sessionRequest)
 	if err != nil {
@@ -438,7 +485,7 @@ func (d DiskCookieStore) cookiePath() string {
 // abstracting how session requests are generated, whether they be from
 // the prompt or from a file.
 type SessionRequestBuilder interface {
-	Build(flag string) (models.SessionRequest, error)
+	Build(flag string) (sessions.SessionRequest, error)
 }
 
 type promptingSessionRequestBuilder struct {
@@ -451,10 +498,10 @@ func NewPromptingSessionRequestBuilder(prompter Prompter) SessionRequestBuilder 
 	return promptingSessionRequestBuilder{prompter}
 }
 
-func (p promptingSessionRequestBuilder) Build(string) (models.SessionRequest, error) {
+func (p promptingSessionRequestBuilder) Build(string) (sessions.SessionRequest, error) {
 	email := p.prompter.Prompt("Enter email: ")
 	pwd := p.prompter.PasswordPrompt("Enter password: ")
-	return models.SessionRequest{Email: email, Password: pwd}, nil
+	return sessions.SessionRequest{Email: email, Password: pwd}, nil
 }
 
 type fileSessionRequestBuilder struct{}
@@ -464,7 +511,7 @@ func NewFileSessionRequestBuilder() SessionRequestBuilder {
 	return fileSessionRequestBuilder{}
 }
 
-func (f fileSessionRequestBuilder) Build(file string) (models.SessionRequest, error) {
+func (f fileSessionRequestBuilder) Build(file string) (sessions.SessionRequest, error) {
 	return credentialsFromFile(file)
 }
 
@@ -472,7 +519,7 @@ func (f fileSessionRequestBuilder) Build(file string) (models.SessionRequest, er
 // needed to access the API. Does nothing if API user already exists.
 type APIInitializer interface {
 	// Initialize creates a new user for API access, or does nothing if one exists.
-	Initialize(store *store.Store) (models.User, error)
+	Initialize(orm sessions.ORM) (sessions.User, error)
 }
 
 type promptingAPIInitializer struct {
@@ -486,24 +533,24 @@ func NewPromptingAPIInitializer(prompter Prompter) APIInitializer {
 }
 
 // Initialize uses the terminal to get credentials that it then saves in the store.
-func (t *promptingAPIInitializer) Initialize(store *store.Store) (models.User, error) {
-	if user, err := store.FindUser(); err == nil {
+func (t *promptingAPIInitializer) Initialize(orm sessions.ORM) (sessions.User, error) {
+	if user, err := orm.FindUser(); err == nil {
 		return user, err
 	}
 
 	if !t.prompter.IsTerminal() {
-		return models.User{}, ErrorNoAPICredentialsAvailable
+		return sessions.User{}, ErrorNoAPICredentialsAvailable
 	}
 
 	for {
 		email := t.prompter.Prompt("Enter API Email: ")
 		pwd := t.prompter.PasswordPrompt("Enter API Password: ")
-		user, err := models.NewUser(email, pwd)
+		user, err := sessions.NewUser(email, pwd)
 		if err != nil {
 			fmt.Println("Error creating API user: ", err)
 			continue
 		}
-		if err = store.SaveUser(&user); err != nil {
+		if err = orm.CreateUser(&user); err != nil {
 			fmt.Println("Error creating API user: ", err)
 		}
 		return user, err
@@ -520,40 +567,40 @@ func NewFileAPIInitializer(file string) APIInitializer {
 	return fileAPIInitializer{file: file}
 }
 
-func (f fileAPIInitializer) Initialize(store *store.Store) (models.User, error) {
-	if user, err := store.FindUser(); err == nil {
+func (f fileAPIInitializer) Initialize(orm sessions.ORM) (sessions.User, error) {
+	if user, err := orm.FindUser(); err == nil {
 		return user, err
 	}
 
 	request, err := credentialsFromFile(f.file)
 	if err != nil {
-		return models.User{}, err
+		return sessions.User{}, err
 	}
 
-	user, err := models.NewUser(request.Email, request.Password)
+	user, err := sessions.NewUser(request.Email, request.Password)
 	if err != nil {
 		return user, err
 	}
-	return user, store.SaveUser(&user)
+	return user, orm.CreateUser(&user)
 }
 
 var ErrNoCredentialFile = errors.New("no API user credential file was passed")
 
-func credentialsFromFile(file string) (models.SessionRequest, error) {
+func credentialsFromFile(file string) (sessions.SessionRequest, error) {
 	if len(file) == 0 {
-		return models.SessionRequest{}, ErrNoCredentialFile
+		return sessions.SessionRequest{}, ErrNoCredentialFile
 	}
 
 	logger.Debug("Initializing API credentials from ", file)
 	dat, err := ioutil.ReadFile(file)
 	if err != nil {
-		return models.SessionRequest{}, err
+		return sessions.SessionRequest{}, err
 	}
 	lines := strings.Split(string(dat), "\n")
 	if len(lines) < 2 {
-		return models.SessionRequest{}, fmt.Errorf("malformed API credentials file does not have at least two lines at %s", file)
+		return sessions.SessionRequest{}, fmt.Errorf("malformed API credentials file does not have at least two lines at %s", file)
 	}
-	credentials := models.SessionRequest{
+	credentials := sessions.SessionRequest{
 		Email:    strings.TrimSpace(lines[0]),
 		Password: strings.TrimSpace(lines[1]),
 	}

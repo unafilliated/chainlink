@@ -21,10 +21,10 @@ import (
 	uuid "github.com/satori/go.uuid"
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/auth"
-	evmconfig "github.com/smartcontractkit/chainlink/core/chains/evm/config"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/flux_aggregator_wrapper"
-	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
+	"github.com/smartcontractkit/chainlink/core/services/eth"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/keeper"
 	"github.com/smartcontractkit/chainlink/core/services/keystore"
@@ -32,7 +32,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/p2pkey"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
-	strpkg "github.com/smartcontractkit/chainlink/core/store"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/utils"
 	"github.com/stretchr/testify/require"
@@ -76,13 +75,13 @@ func Random32Byte() (b [32]byte) {
 }
 
 // NewBridgeType create new bridge type given info slice
-func NewBridgeType(t testing.TB, info ...string) (*models.BridgeTypeAuthentication, *models.BridgeType) {
-	btr := &models.BridgeTypeRequest{}
+func NewBridgeType(t testing.TB, info ...string) (*bridges.BridgeTypeAuthentication, *bridges.BridgeType) {
+	btr := &bridges.BridgeTypeRequest{}
 
 	if len(info) > 0 {
-		btr.Name = models.MustNewTaskType(info[0])
+		btr.Name = bridges.MustNewTaskType(info[0])
 	} else {
-		btr.Name = models.MustNewTaskType("defaultFixtureBridgeType")
+		btr.Name = bridges.MustNewTaskType("defaultFixtureBridgeType")
 	}
 
 	if len(info) > 1 {
@@ -91,7 +90,7 @@ func NewBridgeType(t testing.TB, info ...string) (*models.BridgeTypeAuthenticati
 		btr.URL = WebURL(t, "https://bridge.example.com/api")
 	}
 
-	bta, bt, err := models.NewBridgeType(btr)
+	bta, bt, err := bridges.NewBridgeType(btr)
 	require.NoError(t, err)
 	return bta, bt
 }
@@ -137,96 +136,6 @@ func MustJSONDel(t *testing.T, json, path string) string {
 	return json
 }
 
-var (
-	// RunLogTopic20190207withoutIndexes was the new RunRequest filter topic as of 2019-01-28,
-	// after renaming Solidity variables, moving data version, and removing the cast of requestId to uint256
-	RunLogTopic20190207withoutIndexes = utils.MustHash("OracleRequest(bytes32,address,bytes32,uint256,address,bytes4,uint256,uint256,bytes)")
-)
-
-// NewRunLog create types.Log for given jobid, address, block, and json
-func NewRunLog(
-	t *testing.T,
-	jobID common.Hash,
-	emitter common.Address,
-	requester common.Address,
-	blk int,
-	json string,
-) types.Log {
-	return types.Log{
-		Address:     emitter,
-		BlockNumber: uint64(blk),
-		Data:        StringToVersionedLogData20190207withoutIndexes(t, "internalID", requester, json),
-		TxHash:      utils.NewHash(),
-		BlockHash:   utils.NewHash(),
-		Topics: []common.Hash{
-			RunLogTopic20190207withoutIndexes,
-			jobID,
-		},
-	}
-}
-
-func StringToVersionedLogData20190207withoutIndexes(
-	t *testing.T,
-	internalID string,
-	requester common.Address,
-	str string,
-) []byte {
-	requesterBytes := requester.Hash().Bytes()
-	buf := bytes.NewBuffer(requesterBytes)
-
-	requestID := hexutil.MustDecode(StringToHash(internalID).Hex())
-	buf.Write(requestID)
-
-	payment := hexutil.MustDecode(evmconfig.DefaultMinimumContractPayment.ToHash().Hex())
-	buf.Write(payment)
-
-	callbackAddr := utils.EVMWordUint64(0)
-	buf.Write(callbackAddr)
-
-	callbackFunc := utils.EVMWordUint64(0)
-	buf.Write(callbackFunc)
-
-	expiration := utils.EVMWordUint64(4000000000)
-	buf.Write(expiration)
-
-	version := utils.EVMWordUint64(1)
-	buf.Write(version)
-
-	dataLocation := utils.EVMWordUint64(common.HashLength * 8)
-	buf.Write(dataLocation)
-
-	cbor, err := JSONFromString(t, str).CBOR()
-	require.NoError(t, err)
-	buf.Write(utils.EVMWordUint64(uint64(len(cbor))))
-	paddedLength := common.HashLength * ((len(cbor) / common.HashLength) + 1)
-	buf.Write(common.RightPadBytes(cbor, paddedLength))
-
-	return buf.Bytes()
-}
-
-// BigHexInt create hexutil.Big value from given value
-func BigHexInt(val interface{}) hexutil.Big {
-	switch x := val.(type) {
-	case int: // Single case allows compiler to narrow x's type.
-		return hexutil.Big(*big.NewInt(int64(x)))
-	case uint32:
-		return hexutil.Big(*big.NewInt(int64(x)))
-	case uint64:
-		return hexutil.Big(*big.NewInt(0).SetUint64(x))
-	case int64:
-		return hexutil.Big(*big.NewInt(x))
-	default:
-		logger.Panicf("Could not convert %v of type %T to hexutil.Big", val, val)
-		return hexutil.Big{}
-	}
-}
-
-type MockSigner struct{}
-
-func (s MockSigner) SignHash(common.Hash) (models.Signature, error) {
-	return models.NewSignature("0xb7a987222fc36c4c8ed1b91264867a422769998aadbeeb1c697586a04fa2b616025b5ca936ec5bdb150999e298b6ecf09251d3c4dd1306dedec0692e7037584800")
-}
-
 func EmptyCLIContext() *cli.Context {
 	set := flag.NewFlagSet("test", 0)
 	return cli.NewContext(nil, set, nil)
@@ -261,11 +170,38 @@ func MustInsertUnconfirmedEthTx(t *testing.T, db *gorm.DB, nonce int64, fromAddr
 	return etx
 }
 
-func MustInsertUnconfirmedEthTxWithBroadcastAttempt(t *testing.T, db *gorm.DB, nonce int64, fromAddress common.Address, opts ...interface{}) bulletprooftxmanager.EthTx {
+func MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t *testing.T, db *gorm.DB, nonce int64, fromAddress common.Address, opts ...interface{}) bulletprooftxmanager.EthTx {
 	etx := MustInsertUnconfirmedEthTx(t, db, nonce, fromAddress, opts...)
-	attempt := NewEthTxAttempt(t, etx.ID)
+	attempt := NewLegacyEthTxAttempt(t, etx.ID)
 
 	tx := types.NewTransaction(uint64(nonce), NewAddress(), big.NewInt(142), 242, big.NewInt(342), []byte{1, 2, 3})
+	rlp := new(bytes.Buffer)
+	require.NoError(t, tx.EncodeRLP(rlp))
+	attempt.SignedRawTx = rlp.Bytes()
+
+	attempt.State = bulletprooftxmanager.EthTxAttemptBroadcast
+	require.NoError(t, db.Save(&attempt).Error)
+	etx, err := FindEthTxWithAttempts(db, etx.ID)
+	require.NoError(t, err)
+	return etx
+}
+
+func MustInsertUnconfirmedEthTxWithBroadcastDynamicFeeAttempt(t *testing.T, db *gorm.DB, nonce int64, fromAddress common.Address, opts ...interface{}) bulletprooftxmanager.EthTx {
+	etx := MustInsertUnconfirmedEthTx(t, db, nonce, fromAddress, opts...)
+	attempt := NewDynamicFeeEthTxAttempt(t, etx.ID)
+
+	addr := NewAddress()
+	dtx := types.DynamicFeeTx{
+		ChainID:   big.NewInt(0),
+		Nonce:     uint64(nonce),
+		GasTipCap: big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		Gas:       242,
+		To:        &addr,
+		Value:     big.NewInt(342),
+		Data:      []byte{2, 3, 4},
+	}
+	tx := types.NewTx(&dtx)
 	rlp := new(bytes.Buffer)
 	require.NoError(t, tx.EncodeRLP(rlp))
 	attempt.SignedRawTx = rlp.Bytes()
@@ -295,7 +231,7 @@ func MustInsertUnconfirmedEthTxWithInsufficientEthAttempt(t *testing.T, db *gorm
 	etx.Nonce = &n
 	etx.State = bulletprooftxmanager.EthTxUnconfirmed
 	require.NoError(t, db.Save(&etx).Error)
-	attempt := NewEthTxAttempt(t, etx.ID)
+	attempt := NewLegacyEthTxAttempt(t, etx.ID)
 
 	tx := types.NewTransaction(uint64(nonce), NewAddress(), big.NewInt(142), 242, big.NewInt(342), []byte{1, 2, 3})
 	rlp := new(bytes.Buffer)
@@ -309,7 +245,7 @@ func MustInsertUnconfirmedEthTxWithInsufficientEthAttempt(t *testing.T, db *gorm
 	return etx
 }
 
-func MustInsertConfirmedEthTxWithAttempt(t *testing.T, db *gorm.DB, nonce int64, broadcastBeforeBlockNum int64, fromAddress common.Address) bulletprooftxmanager.EthTx {
+func MustInsertConfirmedEthTxWithLegacyAttempt(t *testing.T, db *gorm.DB, nonce int64, broadcastBeforeBlockNum int64, fromAddress common.Address) bulletprooftxmanager.EthTx {
 	timeNow := time.Now()
 	etx := NewEthTx(t, fromAddress)
 
@@ -317,7 +253,7 @@ func MustInsertConfirmedEthTxWithAttempt(t *testing.T, db *gorm.DB, nonce int64,
 	etx.Nonce = &nonce
 	etx.State = bulletprooftxmanager.EthTxConfirmed
 	require.NoError(t, db.Save(&etx).Error)
-	attempt := NewEthTxAttempt(t, etx.ID)
+	attempt := NewLegacyEthTxAttempt(t, etx.ID)
 	attempt.BroadcastBeforeBlockNum = &broadcastBeforeBlockNum
 	attempt.State = bulletprooftxmanager.EthTxAttemptBroadcast
 	require.NoError(t, db.Save(&attempt).Error)
@@ -332,7 +268,7 @@ func MustInsertInProgressEthTxWithAttempt(t *testing.T, db *gorm.DB, nonce int64
 	etx.Nonce = &nonce
 	etx.State = bulletprooftxmanager.EthTxInProgress
 	require.NoError(t, db.Save(&etx).Error)
-	attempt := NewEthTxAttempt(t, etx.ID)
+	attempt := NewLegacyEthTxAttempt(t, etx.ID)
 	tx := types.NewTransaction(uint64(nonce), NewAddress(), big.NewInt(142), 242, big.NewInt(342), []byte{1, 2, 3})
 	rlp := new(bytes.Buffer)
 	require.NoError(t, tx.EncodeRLP(rlp))
@@ -359,11 +295,12 @@ func MustInsertUnstartedEthTx(t *testing.T, db *gorm.DB, fromAddress common.Addr
 	return etx
 }
 
-func NewEthTxAttempt(t *testing.T, etxID int64) bulletprooftxmanager.EthTxAttempt {
+func NewLegacyEthTxAttempt(t *testing.T, etxID int64) bulletprooftxmanager.EthTxAttempt {
 	gasPrice := utils.NewBig(big.NewInt(1))
 	return bulletprooftxmanager.EthTxAttempt{
-		EthTxID:  etxID,
-		GasPrice: *gasPrice,
+		ChainSpecificGasLimit: 42,
+		EthTxID:               etxID,
+		GasPrice:              gasPrice,
 		// Just a random signed raw tx that decodes correctly
 		// Ignore all actual values
 		SignedRawTx: hexutil.MustDecode("0xf889808504a817c8008307a12094000000000000000000000000000000000000000080a400000000000000000000000000000000000000000000000000000000000000000000000025a0838fe165906e2547b9a052c099df08ec891813fea4fcdb3c555362285eb399c5a070db99322490eb8a0f2270be6eca6e3aedbc49ff57ef939cf2774f12d08aa85e"),
@@ -372,10 +309,27 @@ func NewEthTxAttempt(t *testing.T, etxID int64) bulletprooftxmanager.EthTxAttemp
 	}
 }
 
-func MustInsertBroadcastEthTxAttempt(t *testing.T, etxID int64, db *gorm.DB, gasPrice int64) bulletprooftxmanager.EthTxAttempt {
-	attempt := NewEthTxAttempt(t, etxID)
+func NewDynamicFeeEthTxAttempt(t *testing.T, etxID int64) bulletprooftxmanager.EthTxAttempt {
+	gasTipCap := utils.NewBig(big.NewInt(1))
+	gasFeeCap := utils.NewBig(big.NewInt(1))
+	return bulletprooftxmanager.EthTxAttempt{
+		TxType:    0x2,
+		EthTxID:   etxID,
+		GasTipCap: gasTipCap,
+		GasFeeCap: gasFeeCap,
+		// Just a random signed raw tx that decodes correctly
+		// Ignore all actual values
+		SignedRawTx:           hexutil.MustDecode("0xf889808504a817c8008307a12094000000000000000000000000000000000000000080a400000000000000000000000000000000000000000000000000000000000000000000000025a0838fe165906e2547b9a052c099df08ec891813fea4fcdb3c555362285eb399c5a070db99322490eb8a0f2270be6eca6e3aedbc49ff57ef939cf2774f12d08aa85e"),
+		Hash:                  utils.NewHash(),
+		State:                 bulletprooftxmanager.EthTxAttemptInProgress,
+		ChainSpecificGasLimit: 42,
+	}
+}
+
+func MustInsertBroadcastLegacyEthTxAttempt(t *testing.T, etxID int64, db *gorm.DB, gasPrice int64) bulletprooftxmanager.EthTxAttempt {
+	attempt := NewLegacyEthTxAttempt(t, etxID)
 	attempt.State = bulletprooftxmanager.EthTxAttemptBroadcast
-	attempt.GasPrice = *utils.NewBig(big.NewInt(gasPrice))
+	attempt.GasPrice = utils.NewBig(big.NewInt(gasPrice))
 	require.NoError(t, db.Create(&attempt).Error)
 	return attempt
 }
@@ -405,7 +359,7 @@ func MustInsertEthReceipt(t *testing.T, db *gorm.DB, blockNumber int64, blockHas
 }
 
 func MustInsertConfirmedEthTxWithReceipt(t *testing.T, db *gorm.DB, fromAddress common.Address, nonce, blockNum int64) (etx bulletprooftxmanager.EthTx) {
-	etx = MustInsertConfirmedEthTxWithAttempt(t, db, nonce, blockNum, fromAddress)
+	etx = MustInsertConfirmedEthTxWithLegacyAttempt(t, db, nonce, blockNum, fromAddress)
 	MustInsertEthReceipt(t, db, blockNum, utils.NewHash(), etx.EthTxAttempts[0].Hash)
 	return etx
 }
@@ -496,24 +450,24 @@ func MustGenerateRandomKeyState(t testing.TB) ethkey.State {
 	return ethkey.State{Address: NewEIP55Address()}
 }
 
-func MustInsertHead(t *testing.T, store *strpkg.Store, number int64) models.Head {
-	h := models.NewHead(big.NewInt(number), utils.NewHash(), utils.NewHash(), 0, utils.NewBig(&FixtureChainID))
-	err := store.DB.Create(&h).Error
+func MustInsertHead(t *testing.T, db *gorm.DB, number int64) eth.Head {
+	h := eth.NewHead(big.NewInt(number), utils.NewHash(), utils.NewHash(), 0, utils.NewBig(&FixtureChainID))
+	err := db.Create(&h).Error
 	require.NoError(t, err)
 	return h
 }
 
-func MustInsertV2JobSpec(t *testing.T, store *strpkg.Store, transmitterAddress common.Address) job.Job {
+func MustInsertV2JobSpec(t *testing.T, db *gorm.DB, transmitterAddress common.Address) job.Job {
 	t.Helper()
 
 	addr, err := ethkey.NewEIP55Address(transmitterAddress.Hex())
 	require.NoError(t, err)
 
 	pipelineSpec := pipeline.Spec{}
-	err = store.DB.Create(&pipelineSpec).Error
+	err = db.Create(&pipelineSpec).Error
 	require.NoError(t, err)
 
-	oracleSpec := MustInsertOffchainreportingOracleSpec(t, store.DB, addr)
+	oracleSpec := MustInsertOffchainreportingOracleSpec(t, db, addr)
 	jb := job.Job{
 		OffchainreportingOracleSpec:   &oracleSpec,
 		OffchainreportingOracleSpecID: &oracleSpec.ID,
@@ -524,7 +478,7 @@ func MustInsertV2JobSpec(t *testing.T, store *strpkg.Store, transmitterAddress c
 		PipelineSpecID:                pipelineSpec.ID,
 	}
 
-	err = store.DB.Create(&jb).Error
+	err = db.Create(&jb).Error
 	require.NoError(t, err)
 	return jb
 }
@@ -566,15 +520,44 @@ func MakeDirectRequestJobSpec(t *testing.T) *job.Job {
 
 func MustInsertKeeperJob(t *testing.T, db *gorm.DB, from ethkey.EIP55Address, contract ethkey.EIP55Address) job.Job {
 	t.Helper()
-	pipelineSpec := pipeline.Spec{}
-	err := db.Create(&pipelineSpec).Error
-	require.NoError(t, err)
+
 	keeperSpec := job.KeeperSpec{
 		ContractAddress: contract,
 		FromAddress:     from,
 	}
-	err = db.Create(&keeperSpec).Error
+	err := db.Create(&keeperSpec).Error
 	require.NoError(t, err)
+
+	pipelineSpec := pipeline.Spec{
+		DotDagSource: `
+encode_check_upkeep_tx   [type=ethabiencode
+                          abi="checkUpkeep(uint256 id, address from)"
+                          data="{\"id\":$(jobSpec.upkeepID),\"from\":$(jobSpec.fromAddress)}"]
+check_upkeep_tx          [type=ethcall
+                          failEarly=true
+                          extractRevertReason=true
+                          contract="$(jobSpec.contractAddress)"
+                          gas="$(jobSpec.checkUpkeepGasLimit)"
+                          gasPrice="$(jobSpec.gasPrice)"
+                          data="$(encode_check_upkeep_tx)"]
+decode_check_upkeep_tx   [type=ethabidecode
+                          abi="bytes memory performData, uint256 maxLinkPayment, uint256 gasLimit, uint256 adjustedGasWei, uint256 linkEth"]
+encode_perform_upkeep_tx [type=ethabiencode
+                          abi="performUpkeep(uint256 id, bytes calldata performData)"
+                          data="{\"id\": $(jobSpec.upkeepID),\"performData\":$(decode_check_upkeep_tx.performData)}"]
+perform_upkeep_tx        [type=ethtx
+                          minConfirmations=0
+                          to="$(jobSpec.contractAddress)"
+                          data="$(encode_perform_upkeep_tx)"
+                          gasLimit="$(jobSpec.performUpkeepGasLimit)"
+                          txMeta="{\"jobID\":$(jobSpec.jobID)}"]
+encode_check_upkeep_tx -> check_upkeep_tx -> decode_check_upkeep_tx -> encode_perform_upkeep_tx -> perform_upkeep_tx`,
+		JobID:   keeperSpec.ID,
+		JobName: "keeper",
+	}
+	err = db.Create(&pipelineSpec).Error
+	require.NoError(t, err)
+
 	specDB := job.Job{
 		KeeperSpec:     &keeperSpec,
 		KeeperSpecID:   &keeperSpec.ID,
@@ -628,16 +611,6 @@ func MustInsertUpkeepForRegistry(t *testing.T, db *gorm.DB, cfg keeper.Config, r
 	return upkeep
 }
 
-func NewRoundStateForRoundID(store *strpkg.Store, roundID uint32, latestSubmission *big.Int) flux_aggregator_wrapper.OracleRoundState {
-	return flux_aggregator_wrapper.OracleRoundState{
-		RoundId:          roundID,
-		EligibleToSubmit: true,
-		LatestSubmission: latestSubmission,
-		AvailableFunds:   evmconfig.DefaultMinimumContractPayment.ToInt(),
-		PaymentAmount:    evmconfig.DefaultMinimumContractPayment.ToInt(),
-	}
-}
-
 func MustInsertPipelineRun(t *testing.T, db *gorm.DB) pipeline.Run {
 	run := pipeline.Run{
 		State:      pipeline.RunStatusRunning,
@@ -649,10 +622,10 @@ func MustInsertPipelineRun(t *testing.T, db *gorm.DB) pipeline.Run {
 	return run
 }
 
-func MustInsertUnfinishedPipelineTaskRun(t *testing.T, store *strpkg.Store, pipelineRunID int64) pipeline.TaskRun {
+func MustInsertUnfinishedPipelineTaskRun(t *testing.T, db *gorm.DB, pipelineRunID int64) pipeline.TaskRun {
 	/* #nosec G404 */
 	p := pipeline.TaskRun{DotID: strconv.Itoa(mathrand.Int()), PipelineRunID: pipelineRunID, ID: uuid.NewV4()}
-	require.NoError(t, store.DB.Create(&p).Error)
+	require.NoError(t, db.Create(&p).Error)
 	return p
 }
 
@@ -715,7 +688,7 @@ func RawNewRoundLogWithTopics(t *testing.T, contractAddr common.Address, blockHa
 	}
 }
 
-func MustInsertExternalInitiator(t *testing.T, db *gorm.DB) (ei models.ExternalInitiator) {
+func MustInsertExternalInitiator(t *testing.T, db *gorm.DB) (ei bridges.ExternalInitiator) {
 	return MustInsertExternalInitiatorWithOpts(t, db, ExternalInitiatorOpts{})
 }
 
@@ -726,7 +699,7 @@ type ExternalInitiatorOpts struct {
 	OutgoingToken  string
 }
 
-func MustInsertExternalInitiatorWithOpts(t *testing.T, db *gorm.DB, opts ExternalInitiatorOpts) (ei models.ExternalInitiator) {
+func MustInsertExternalInitiatorWithOpts(t *testing.T, db *gorm.DB, opts ExternalInitiatorOpts) (ei bridges.ExternalInitiator) {
 	var prefix string
 	if opts.NamePrefix != "" {
 		prefix = opts.NamePrefix

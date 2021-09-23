@@ -3,6 +3,7 @@ import React from 'react'
 import { ChainSpecV2 } from './ChainsIndex'
 import { tableStyles } from 'components/Table'
 import { TimeAgo } from 'components/TimeAgo'
+import Link from 'components/Link'
 
 import { withStyles, WithStyles } from '@material-ui/core/styles'
 import TableCell from '@material-ui/core/TableCell'
@@ -13,19 +14,21 @@ interface Props extends WithStyles<typeof tableStyles> {
 }
 
 export const ChainRow = withStyles(tableStyles)(({ chain, classes }: Props) => {
-  const createdAt = chain.attributes.createdAt
+  const { enabled, config, createdAt } = chain.attributes
 
   const configOverrides = Object.fromEntries(
-    Object.entries(chain.attributes.config).filter(
-      ([_key, value]) => value !== null,
-    ),
+    Object.entries(config).filter(([_key, value]) => value !== null),
   )
 
   return (
     <TableRow className={classes.row} hover>
       <TableCell className={classes.cell} component="th" scope="row">
-        {chain.id}
+        <Link className={classes.link} href={`/chains/${chain.id}`}>
+          {chain.id}
+        </Link>
       </TableCell>
+
+      <TableCell>{enabled.toString()}</TableCell>
 
       <TableCell>
         <pre>{JSON.stringify(configOverrides, null, 2)}</pre>

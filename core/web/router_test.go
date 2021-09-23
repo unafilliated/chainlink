@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/smartcontractkit/chainlink/core/auth"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/web"
 
 	"github.com/stretchr/testify/assert"
@@ -16,8 +16,7 @@ import (
 )
 
 func TestTokenAuthRequired_NoCredentials(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)
@@ -31,8 +30,7 @@ func TestTokenAuthRequired_NoCredentials(t *testing.T) {
 }
 
 func TestTokenAuthRequired_SessionCredentials(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)
@@ -47,8 +45,7 @@ func TestTokenAuthRequired_SessionCredentials(t *testing.T) {
 }
 
 func TestTokenAuthRequired_TokenCredentials(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)
@@ -57,13 +54,13 @@ func TestTokenAuthRequired_TokenCredentials(t *testing.T) {
 
 	eia := auth.NewToken()
 	url := cltest.WebURL(t, "http://localhost:8888")
-	eir := &models.ExternalInitiatorRequest{
+	eir := &bridges.ExternalInitiatorRequest{
 		Name: "bitcoin",
 		URL:  &url,
 	}
-	ea, err := models.NewExternalInitiator(eia, eir)
+	ea, err := bridges.NewExternalInitiator(eia, eir)
 	require.NoError(t, err)
-	err = app.GetStore().CreateExternalInitiator(ea)
+	err = app.BridgeORM().CreateExternalInitiator(ea)
 	require.NoError(t, err)
 
 	request, err := http.NewRequest("GET", ts.URL+"/v2/ping/", bytes.NewBufferString("{}"))
@@ -80,8 +77,7 @@ func TestTokenAuthRequired_TokenCredentials(t *testing.T) {
 }
 
 func TestTokenAuthRequired_BadTokenCredentials(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)
@@ -90,13 +86,13 @@ func TestTokenAuthRequired_BadTokenCredentials(t *testing.T) {
 
 	eia := auth.NewToken()
 	url := cltest.WebURL(t, "http://localhost:8888")
-	eir := &models.ExternalInitiatorRequest{
+	eir := &bridges.ExternalInitiatorRequest{
 		Name: "bitcoin",
 		URL:  &url,
 	}
-	ea, err := models.NewExternalInitiator(eia, eir)
+	ea, err := bridges.NewExternalInitiator(eia, eir)
 	require.NoError(t, err)
-	err = app.GetStore().CreateExternalInitiator(ea)
+	err = app.BridgeORM().CreateExternalInitiator(ea)
 	require.NoError(t, err)
 
 	request, err := http.NewRequest("GET", ts.URL+"/v2/ping/", bytes.NewBufferString("{}"))
@@ -113,8 +109,7 @@ func TestTokenAuthRequired_BadTokenCredentials(t *testing.T) {
 }
 
 func TestSessions_RateLimited(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)
@@ -142,8 +137,7 @@ func TestSessions_RateLimited(t *testing.T) {
 }
 
 func TestRouter_LargePOSTBody(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)
@@ -162,8 +156,7 @@ func TestRouter_LargePOSTBody(t *testing.T) {
 }
 
 func TestRouter_GinHelmetHeaders(t *testing.T) {
-	app, cleanup := cltest.NewApplicationEVMDisabled(t)
-	t.Cleanup(cleanup)
+	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start())
 
 	router := web.Router(app)

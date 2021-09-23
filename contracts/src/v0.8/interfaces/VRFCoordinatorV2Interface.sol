@@ -2,7 +2,6 @@
 pragma solidity ^0.8.0;
 
 interface VRFCoordinatorV2Interface {
-
   /**
    * @notice Returns the global config that applies to all VRF requests.
    * @return minimumRequestBlockConfirmations - A minimum number of confirmation
@@ -19,17 +18,17 @@ interface VRFCoordinatorV2Interface {
    * @return fallbackWeiPerUnitLink - fallback ETH/LINK price in the case of a stale feed.
    */
   function getConfig()
-  external
-  view
-  returns (
-    uint16 minimumRequestBlockConfirmations,
-    uint32 fulfillmentFlatFeeLinkPPM,
-    uint32 maxGasLimit,
-    uint32 stalenessSeconds,
-    uint32 gasAfterPaymentCalculation,
-    uint96 minimumSubscriptionBalance,
-    int256 fallbackWeiPerUnitLink
-  );
+    external
+    view
+    returns (
+      uint16 minimumRequestBlockConfirmations,
+      uint32 fulfillmentFlatFeeLinkPPM,
+      uint32 maxGasLimit,
+      uint32 stalenessSeconds,
+      uint32 gasAfterPaymentCalculation,
+      uint96 minimumSubscriptionBalance,
+      int256 fallbackWeiPerUnitLink
+    );
 
   /**
    * @notice Request a set of random words.
@@ -57,34 +56,23 @@ interface VRFCoordinatorV2Interface {
    */
   function requestRandomWords(
     bytes32 keyHash,
-    uint64  subId,
-    uint16  minimumRequestConfirmations,
-    uint32  callbackGasLimit,
-    uint32  numWords
-  )
-    external
-    returns (
-      uint256 requestId
-    );
+    uint64 subId,
+    uint16 minimumRequestConfirmations,
+    uint32 callbackGasLimit,
+    uint32 numWords
+  ) external returns (uint256 requestId);
 
   /**
    * @notice Create a VRF subscription.
-   * @param consumers - a list of the consuming addresses if known ahead of time.
-   * You can manage the consumer set dynamically with addConsumer/removeConsumer.
    * @return subId - A unique subscription id.
+   * @dev You can manage the consumer set dynamically with addConsumer/removeConsumer.
    * @dev Note to fund the subscription, use transferAndCall. For example
    * @dev  LINKTOKEN.transferAndCall(
    * @dev    address(COORDINATOR),
    * @dev    amount,
    * @dev    abi.encode(subId));
    */
-  function createSubscription(
-    address[] memory consumers
-  )
-    external
-    returns (
-      uint64 subId
-    );
+  function createSubscription() external returns (uint64 subId);
 
   /**
    * @notice Get a VRF subscription.
@@ -93,9 +81,7 @@ interface VRFCoordinatorV2Interface {
    * @return owner - Owner of the subscription
    * @return consumers - List of consumer address which are able to use this subscription.
    */
-  function getSubscription(
-    uint64 subId
-  )
+  function getSubscription(uint64 subId)
     external
     view
     returns (
@@ -109,11 +95,7 @@ interface VRFCoordinatorV2Interface {
    * @param subId - ID of the subscription
    * @param newOwner - proposed new owner of the subscription
    */
-  function requestSubscriptionOwnerTransfer(
-    uint64 subId,
-    address newOwner
-  )
-    external;
+  function requestSubscriptionOwnerTransfer(uint64 subId, address newOwner) external;
 
   /**
    * @notice Request subscription owner transfer.
@@ -121,32 +103,21 @@ interface VRFCoordinatorV2Interface {
    * @dev will revert if original owner of subId has
    * not requested that msg.sender become the new owner.
    */
-  function acceptSubscriptionOwnerTransfer(
-    uint64 subId
-  )
-    external;
+  function acceptSubscriptionOwnerTransfer(uint64 subId) external;
 
   /**
    * @notice Add a consumer to a VRF subscription.
    * @param subId - ID of the subscription
    * @param consumer - New consumer which can use the subscription
    */
-  function addConsumer(
-    uint64 subId,
-    address consumer
-  )
-    external;
+  function addConsumer(uint64 subId, address consumer) external;
 
   /**
    * @notice Remove a consumer from a VRF subscription.
    * @param subId - ID of the subscription
    * @param consumer - Consumer to remove from the subscription
    */
-  function removeConsumer(
-    uint64 subId,
-    address consumer
-  )
-    external;
+  function removeConsumer(uint64 subId, address consumer) external;
 
   /**
    * @notice Withdraw funds from a VRF subscription
@@ -158,17 +129,12 @@ interface VRFCoordinatorV2Interface {
     uint64 subId,
     address to,
     uint96 amount
-  )
-    external;
+  ) external;
 
   /**
    * @notice Cancel a subscription
    * @param subId - ID of the subscription
    * @param to - Where to send the remaining LINK to
    */
-  function cancelSubscription(
-    uint64 subId,
-    address to
-  )
-    external;
+  function cancelSubscription(uint64 subId, address to) external;
 }

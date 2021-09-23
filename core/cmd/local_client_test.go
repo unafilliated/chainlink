@@ -14,8 +14,11 @@ import (
 	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
+	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
+	"github.com/smartcontractkit/chainlink/core/services/postgres"
+	"github.com/smartcontractkit/chainlink/core/sessions"
 	"github.com/smartcontractkit/chainlink/core/store/config"
 	"github.com/smartcontractkit/chainlink/core/store/dialects"
 
@@ -32,9 +35,9 @@ func TestClient_RunNodeShowsEnv(t *testing.T) {
 	cfg := cltest.NewTestGeneralConfig(t)
 	debug := config.LogLevel{Level: zapcore.DebugLevel}
 	cfg.Overrides.LogLevel = &debug
-	store, cleanup := cltest.NewStoreWithConfig(t, cfg)
-	defer cleanup()
-	keyStore := cltest.NewKeyStore(t, store.DB)
+	db := pgtest.NewGormDB(t)
+	sessionORM := sessions.NewORM(postgres.UnwrapGormDB(db), time.Minute)
+	keyStore := cltest.NewKeyStore(t, db)
 	_, err := keyStore.Eth().Create(&cltest.FixtureChainID)
 	require.NoError(t, err)
 
@@ -43,7 +46,7 @@ func TestClient_RunNodeShowsEnv(t *testing.T) {
 	ethClient.On("BalanceAt", mock.Anything, mock.Anything, mock.Anything).Return(big.NewInt(10), nil)
 
 	app := new(mocks.Application)
-	app.On("GetStore").Return(store)
+	app.On("SessionORM").Return(sessionORM)
 	app.On("GetKeyStore").Return(keyStore)
 	app.On("GetChainSet").Return(cltest.NewChainSetMockWithOneChain(t, ethClient, evmtest.NewChainScopedConfig(t, cfg))).Maybe()
 	app.On("Start").Return(nil)
@@ -51,7 +54,7 @@ func TestClient_RunNodeShowsEnv(t *testing.T) {
 
 	runner := cltest.BlockedRunner{Done: make(chan struct{})}
 	client := cmd.Client{
-		Config:                 store.Config,
+		Config:                 cfg,
 		AppFactory:             cltest.InstanceAppFactory{App: app},
 		FallbackAPIInitializer: &cltest.MockAPIInitializer{},
 		Runner:                 runner,
@@ -108,17 +111,18 @@ func TestClient_RunNodeWithPasswords(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store, cleanup := cltest.NewStore(t)
-			defer cleanup()
-			keyStore := cltest.NewKeyStore(t, store.DB)
+			cfg := cltest.NewTestGeneralConfig(t)
+			db := pgtest.NewGormDB(t)
+			keyStore := cltest.NewKeyStore(t, db)
+			sessionORM := sessions.NewORM(postgres.UnwrapGormDB(db), time.Minute)
 			// Clear out fixture
-			err := store.DeleteUser()
+			err := sessionORM.DeleteUser()
 			require.NoError(t, err)
 
 			app := new(mocks.Application)
-			app.On("GetStore").Return(store)
+			app.On("SessionORM").Return(sessionORM)
 			app.On("GetKeyStore").Return(keyStore)
-			app.On("GetChainSet").Return(cltest.NewChainSetMockWithOneChain(t, cltest.NewEthClientMock(t), evmtest.NewChainScopedConfig(t, store.Config))).Maybe()
+			app.On("GetChainSet").Return(cltest.NewChainSetMockWithOneChain(t, cltest.NewEthClientMock(t), evmtest.NewChainScopedConfig(t, cfg))).Maybe()
 			app.On("Start").Maybe().Return(nil)
 			app.On("Stop").Maybe().Return(nil)
 
@@ -130,7 +134,7 @@ func TestClient_RunNodeWithPasswords(t *testing.T) {
 
 			apiPrompt := &cltest.MockAPIInitializer{}
 			client := cmd.Client{
-				Config:                 store.Config,
+				Config:                 cfg,
 				AppFactory:             cltest.InstanceAppFactory{App: app},
 				FallbackAPIInitializer: apiPrompt,
 				Runner:                 cltest.EmptyRunner{},
@@ -154,16 +158,17 @@ func TestClient_RunNodeWithPasswords(t *testing.T) {
 func TestClient_RunNode_CreateFundingKeyIfNotExists(t *testing.T) {
 	t.Parallel()
 
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-	keyStore := cltest.NewKeyStore(t, store.DB)
+	cfg := cltest.NewTestGeneralConfig(t)
+	db := pgtest.NewGormDB(t)
+	sessionORM := sessions.NewORM(postgres.UnwrapGormDB(db), time.Minute)
+	keyStore := cltest.NewKeyStore(t, db)
 	_, err := keyStore.Eth().Create(&cltest.FixtureChainID)
 	require.NoError(t, err)
 
 	app := new(mocks.Application)
-	app.On("GetStore").Return(store)
+	app.On("SessionORM").Return(sessionORM)
 	app.On("GetKeyStore").Return(keyStore)
-	app.On("GetChainSet").Return(cltest.NewChainSetMockWithOneChain(t, cltest.NewEthClientMock(t), evmtest.NewChainScopedConfig(t, store.Config))).Maybe()
+	app.On("GetChainSet").Return(cltest.NewChainSetMockWithOneChain(t, cltest.NewEthClientMock(t), evmtest.NewChainScopedConfig(t, cfg))).Maybe()
 	app.On("Start").Maybe().Return(nil)
 	app.On("Stop").Maybe().Return(nil)
 
@@ -175,14 +180,14 @@ func TestClient_RunNode_CreateFundingKeyIfNotExists(t *testing.T) {
 
 	apiPrompt := &cltest.MockAPIInitializer{}
 	client := cmd.Client{
-		Config:                 store.Config,
+		Config:                 cfg,
 		AppFactory:             cltest.InstanceAppFactory{App: app},
 		FallbackAPIInitializer: apiPrompt,
 		Runner:                 cltest.EmptyRunner{},
 	}
 
 	var keyState = ethkey.State{}
-	err = store.DB.Where("is_funding = TRUE").Find(&keyState).Error
+	err = db.Where("is_funding = TRUE").Find(&keyState).Error
 	require.NoError(t, err)
 	assert.Empty(t, keyState.ID, "expected no funding key")
 
@@ -192,7 +197,7 @@ func TestClient_RunNode_CreateFundingKeyIfNotExists(t *testing.T) {
 
 	assert.NoError(t, client.RunNode(ctx))
 
-	assert.NoError(t, store.DB.Where("is_funding = TRUE").First(&keyState).Error)
+	assert.NoError(t, db.Where("is_funding = TRUE").First(&keyState).Error)
 	assert.NotEmpty(t, keyState.ID, "expected a new funding key")
 }
 
@@ -212,13 +217,13 @@ func TestClient_RunNodeWithAPICredentialsFile(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := cltest.NewTestGeneralConfig(t)
-
-			store, cleanup := cltest.NewStoreWithConfig(t, cfg)
+			db := pgtest.NewGormDB(t)
+			sessionORM := sessions.NewORM(postgres.UnwrapGormDB(db), time.Minute)
 			// Clear out fixture
-			store.DeleteUser()
-			defer cleanup()
-			keyStore := cltest.NewKeyStore(t, store.DB)
-			_, err := keyStore.Eth().Create(&cltest.FixtureChainID)
+			err := sessionORM.DeleteUser()
+			require.NoError(t, err)
+			keyStore := cltest.NewKeyStore(t, db)
+			_, err = keyStore.Eth().Create(&cltest.FixtureChainID)
 			require.NoError(t, err)
 
 			ethClient := cltest.NewEthClientMock(t)
@@ -226,7 +231,7 @@ func TestClient_RunNodeWithAPICredentialsFile(t *testing.T) {
 			ethClient.On("BalanceAt", mock.Anything, mock.Anything, mock.Anything).Return(big.NewInt(10), nil)
 
 			app := new(mocks.Application)
-			app.On("GetStore").Return(store)
+			app.On("SessionORM").Return(sessionORM)
 			app.On("GetKeyStore").Return(keyStore)
 			app.On("GetChainSet").Return(cltest.NewChainSetMockWithOneChain(t, ethClient, evmtest.NewChainScopedConfig(t, cfg))).Maybe()
 			app.On("Start").Maybe().Return(nil)
@@ -292,11 +297,8 @@ func TestClient_RebroadcastTransactions_BPTXM(t *testing.T) {
 	// Use the a non-transactional db for this test because we need to
 	// test multiple connections to the database, and changes made within
 	// the transaction cannot be seen from another connection.
-	config, _, cleanup := heavyweight.FullTestORM(t, "rebroadcasttransactions", true, true)
-	defer cleanup()
-	connectedStore, connectedCleanup := cltest.NewStoreWithConfig(t, config)
-	defer connectedCleanup()
-	keyStore := cltest.NewKeyStore(t, connectedStore.DB)
+	config, _, db := heavyweight.FullTestDB(t, "rebroadcasttransactions", true, true)
+	keyStore := cltest.NewKeyStore(t, db)
 	_, fromAddress := cltest.MustInsertRandomKey(t, keyStore.Eth(), 0)
 
 	beginningNonce := uint(7)
@@ -313,21 +315,10 @@ func TestClient_RebroadcastTransactions_BPTXM(t *testing.T) {
 	set.String("password", "../internal/fixtures/correct_password.txt", "")
 	c := cli.NewContext(nil, set, nil)
 
-	cltest.MustInsertConfirmedEthTxWithAttempt(t, connectedStore.DB, 7, 42, fromAddress)
-
-	// Use the same config as the connectedStore so that the advisory
-	// lock ID is the same. We set the config to be Postgres Without
-	// Lock, because the db locking strategy is decided when we
-	// initialize the store/ORM.
-
-	config.SetDialect(dialects.PostgresWithoutLock)
-
-	store, cleanup := cltest.NewStoreWithConfig(t, config)
-	defer cleanup()
-	require.NoError(t, connectedStore.Start())
+	cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, 7, 42, fromAddress)
 
 	app := new(mocks.Application)
-	app.On("GetStore").Return(store)
+	app.On("GetDB").Return(db)
 	app.On("GetKeyStore").Return(keyStore)
 	app.On("Stop").Return(nil)
 	ethClient := cltest.NewEthClientMockWithDefaultChain(t)
@@ -350,11 +341,7 @@ func TestClient_RebroadcastTransactions_BPTXM(t *testing.T) {
 		})).Once().Return(nil)
 	}
 
-	// We set the dialect back after initialization so that we can check
-	// that it was set back to WithoutLock at the end of the test.
 	assert.NoError(t, client.RebroadcastTransactions(c))
-	// Check that the Dialect was set back when the command was run.
-	assert.Equal(t, dialects.PostgresWithoutLock, config.GetDatabaseDialectConfiguredOrDefault())
 
 	app.AssertExpectations(t)
 	ethClient.AssertExpectations(t)
@@ -379,12 +366,10 @@ func TestClient_RebroadcastTransactions_OutsideRange_BPTXM(t *testing.T) {
 			// Use the a non-transactional db for this test because we need to
 			// test multiple connections to the database, and changes made within
 			// the transaction cannot be seen from another connection.
-			config, _, cleanup := heavyweight.FullTestORM(t, "rebroadcasttransactions_outsiderange", true, true)
-			defer cleanup()
+			config, _, db := heavyweight.FullTestDB(t, "rebroadcasttransactions_outsiderange", true, true)
 			config.SetDialect(dialects.Postgres)
-			connectedStore, connectedCleanup := cltest.NewStoreWithConfig(t, config)
-			defer connectedCleanup()
-			keyStore := cltest.NewKeyStore(t, connectedStore.DB)
+
+			keyStore := cltest.NewKeyStore(t, db)
 
 			_, fromAddress := cltest.MustInsertRandomKey(t, keyStore.Eth(), 0)
 
@@ -398,19 +383,10 @@ func TestClient_RebroadcastTransactions_OutsideRange_BPTXM(t *testing.T) {
 			set.String("password", "../internal/fixtures/correct_password.txt", "")
 			c := cli.NewContext(nil, set, nil)
 
-			cltest.MustInsertConfirmedEthTxWithAttempt(t, connectedStore.DB, int64(test.nonce), 42, fromAddress)
-
-			// Use the same config as the connectedStore so that the advisory
-			// lock ID is the same. We set the config to be Postgres Without
-			// Lock, because the db locking strategy is decided when we
-			// initialize the store/ORM.
-			config.SetDialect(dialects.PostgresWithoutLock)
-			store, cleanup := cltest.NewStoreWithConfig(t, config)
-			defer cleanup()
-			require.NoError(t, connectedStore.Start())
+			cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, int64(test.nonce), 42, fromAddress)
 
 			app := new(mocks.Application)
-			app.On("GetStore").Return(store)
+			app.On("GetDB").Return(db)
 			app.On("GetKeyStore").Return(keyStore)
 			app.On("Stop").Return(nil)
 			ethClient := cltest.NewEthClientMockWithDefaultChain(t)
@@ -433,13 +409,9 @@ func TestClient_RebroadcastTransactions_OutsideRange_BPTXM(t *testing.T) {
 				})).Once().Return(nil)
 			}
 
-			// We set the dialect back after initialization so that we can check
-			// that it was set back to WithoutLock at the end of the test.
 			assert.NoError(t, client.RebroadcastTransactions(c))
-			// Check that the Dialect was set back when the command was run.
-			assert.Equal(t, dialects.PostgresWithoutLock, config.GetDatabaseDialectConfiguredOrDefault())
 
-			cltest.AssertEthTxAttemptCountStays(t, store, 1)
+			cltest.AssertEthTxAttemptCountStays(t, app.GetDB(), 1)
 			app.AssertExpectations(t)
 			ethClient.AssertExpectations(t)
 		})
@@ -448,12 +420,8 @@ func TestClient_RebroadcastTransactions_OutsideRange_BPTXM(t *testing.T) {
 
 func TestClient_SetNextNonce(t *testing.T) {
 	// Need to use separate database
-	config, _, cleanup := heavyweight.FullTestORM(t, "setnextnonce", true, true)
-	defer cleanup()
-	config.SetDialect(dialects.Postgres)
-	store, cleanup := cltest.NewStoreWithConfig(t, config)
-	defer cleanup()
-	ethKeyStore := cltest.NewKeyStore(t, store.DB).Eth()
+	config, _, db := heavyweight.FullTestDB(t, "setnextnonce", true, true)
+	ethKeyStore := cltest.NewKeyStore(t, db).Eth()
 
 	client := cmd.Client{
 		Config: config,
@@ -471,7 +439,7 @@ func TestClient_SetNextNonce(t *testing.T) {
 	require.NoError(t, client.SetNextNonce(c))
 
 	var state ethkey.State
-	require.NoError(t, store.DB.First(&state).Error)
+	require.NoError(t, db.First(&state).Error)
 	require.NotNil(t, state.NextNonce)
 	require.Equal(t, int64(42), state.NextNonce)
 }

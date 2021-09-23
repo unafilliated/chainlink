@@ -20,10 +20,10 @@ func TestClient_IndexTransactions(t *testing.T) {
 	app := startNewApplication(t)
 	client, r := app.NewClientAndRenderer()
 
-	store := app.GetStore()
+	db := app.GetDB()
 	_, from := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth())
 
-	tx := cltest.MustInsertConfirmedEthTxWithAttempt(t, store.DB, 0, 1, from)
+	tx := cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, 0, 1, from)
 	attempt := tx.EthTxAttempts[0]
 
 	// page 1
@@ -54,10 +54,10 @@ func TestClient_ShowTransaction(t *testing.T) {
 	app := startNewApplication(t)
 	client, r := app.NewClientAndRenderer()
 
-	store := app.GetStore()
+	db := app.GetDB()
 	_, from := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth())
 
-	tx := cltest.MustInsertConfirmedEthTxWithAttempt(t, store.DB, 0, 1, from)
+	tx := cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, 0, 1, from)
 	attempt := tx.EthTxAttempts[0]
 
 	set := flag.NewFlagSet("test get tx", 0)
@@ -75,10 +75,10 @@ func TestClient_IndexTxAttempts(t *testing.T) {
 	app := startNewApplication(t)
 	client, r := app.NewClientAndRenderer()
 
-	store := app.GetStore()
+	db := app.GetDB()
 	_, from := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth())
 
-	tx := cltest.MustInsertConfirmedEthTxWithAttempt(t, store.DB, 0, 1, from)
+	tx := cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, 0, 1, from)
 
 	// page 1
 	set := flag.NewFlagSet("test txattempts", 0)
@@ -105,9 +105,11 @@ func TestClient_IndexTxAttempts(t *testing.T) {
 func TestClient_SendEther_From_BPTXM(t *testing.T) {
 	t.Parallel()
 
+	ethMock, assertMocksCalled := newEthMock(t)
+	defer assertMocksCalled()
 	app := startNewApplication(t,
 		withKey(),
-		withMocks(newEthMock(t)),
+		withMocks(ethMock),
 		withConfigSet(func(c *configtest.TestGeneralConfig) {
 			c.Overrides.EVMDisabled = null.BoolFrom(false)
 			c.Overrides.GlobalEvmNonceAutoSync = null.BoolFrom(false)
@@ -115,7 +117,7 @@ func TestClient_SendEther_From_BPTXM(t *testing.T) {
 		}),
 	)
 	client, r := app.NewClientAndRenderer()
-	s := app.GetStore()
+	db := app.GetDB()
 
 	set := flag.NewFlagSet("sendether", 0)
 	amount := "100.5"
@@ -129,7 +131,7 @@ func TestClient_SendEther_From_BPTXM(t *testing.T) {
 	assert.NoError(t, client.SendEther(c))
 
 	etx := bulletprooftxmanager.EthTx{}
-	require.NoError(t, s.DB.First(&etx).Error)
+	require.NoError(t, db.First(&etx).Error)
 	require.Equal(t, "100.500000000000000000", etx.Value.String())
 	require.Equal(t, fromAddress, etx.FromAddress)
 	require.Equal(t, to, etx.ToAddress.Hex())

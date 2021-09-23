@@ -3,13 +3,13 @@ package bulletprooftxmanager
 import (
 	"fmt"
 	"math/big"
-	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/utils"
+	"go.uber.org/atomic"
 	"gorm.io/gorm"
 )
 
@@ -27,21 +27,21 @@ type Reaper struct {
 	db             *gorm.DB
 	config         ReaperConfig
 	chainID        utils.Big
-	log            *logger.Logger
-	latestBlockNum int64
+	log            logger.Logger
+	latestBlockNum *atomic.Int64
 	trigger        chan struct{}
 	chStop         chan struct{}
 	chDone         chan struct{}
 }
 
 // NewReaper instantiates a new reaper object
-func NewReaper(lggr *logger.Logger, db *gorm.DB, config ReaperConfig, chainID big.Int) *Reaper {
+func NewReaper(lggr logger.Logger, db *gorm.DB, config ReaperConfig, chainID big.Int) *Reaper {
 	return &Reaper{
 		db,
 		config,
 		*utils.NewBig(&chainID),
 		lggr.With("id", "bptxm_reaper"),
-		-1,
+		atomic.NewInt64(-1),
 		make(chan struct{}, 1),
 		make(chan struct{}),
 		make(chan struct{}),
@@ -78,7 +78,7 @@ func (r *Reaper) runLoop() {
 }
 
 func (r *Reaper) work() {
-	latestBlockNum := atomic.LoadInt64(&r.latestBlockNum)
+	latestBlockNum := r.latestBlockNum.Load()
 	if latestBlockNum < 0 {
 		return
 	}
@@ -93,7 +93,7 @@ func (r *Reaper) SetLatestBlockNum(latestBlockNum int64) {
 	if latestBlockNum < 0 {
 		panic(fmt.Sprintf("latestBlockNum must be 0 or greater, got: %d", latestBlockNum))
 	}
-	was := atomic.SwapInt64(&r.latestBlockNum, latestBlockNum)
+	was := r.latestBlockNum.Swap(latestBlockNum)
 	if was < 0 {
 		// Run reaper once on startup
 		r.trigger <- struct{}{}

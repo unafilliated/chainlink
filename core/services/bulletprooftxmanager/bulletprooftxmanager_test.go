@@ -78,7 +78,7 @@ func TestBulletproofTxManager_CheckEthTxQueueCapacity(t *testing.T) {
 	var n int64 = 0
 	cltest.MustInsertInProgressEthTxWithAttempt(t, db, n, fromAddress)
 	n++
-	cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, db, n, fromAddress)
+	cltest.MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t, db, n, fromAddress)
 	n++
 
 	t.Run("unconfirmed and in_progress transactions do not count", func(t *testing.T) {
@@ -88,7 +88,7 @@ func TestBulletproofTxManager_CheckEthTxQueueCapacity(t *testing.T) {
 
 	// deliberately one extra to exceed limit
 	for i := 0; i <= int(maxUnconfirmedTransactions); i++ {
-		cltest.MustInsertConfirmedEthTxWithAttempt(t, db, n, 42, fromAddress)
+		cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, n, 42, fromAddress)
 		n++
 	}
 
@@ -140,10 +140,10 @@ func TestBulletproofTxManager_CountUnconfirmedTransactions(t *testing.T) {
 	_, fromAddress := cltest.MustInsertRandomKey(t, ethKeyStore, 0)
 	_, otherAddress := cltest.MustInsertRandomKey(t, ethKeyStore, 0)
 
-	cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, db, 0, otherAddress)
-	cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, db, 0, fromAddress)
-	cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, db, 1, fromAddress)
-	cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, db, 2, fromAddress)
+	cltest.MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t, db, 0, otherAddress)
+	cltest.MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t, db, 0, fromAddress)
+	cltest.MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t, db, 1, fromAddress)
+	cltest.MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t, db, 2, fromAddress)
 
 	count, err := bulletprooftxmanager.CountUnconfirmedTransactions(db, fromAddress, cltest.FixtureChainID)
 	require.NoError(t, err)
@@ -162,7 +162,7 @@ func TestBulletproofTxManager_CountUnstartedTransactions(t *testing.T) {
 	cltest.MustInsertUnstartedEthTx(t, db, fromAddress)
 	cltest.MustInsertUnstartedEthTx(t, db, fromAddress)
 	cltest.MustInsertUnstartedEthTx(t, db, otherAddress)
-	cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, db, 2, fromAddress)
+	cltest.MustInsertUnconfirmedEthTxWithBroadcastLegacyAttempt(t, db, 2, fromAddress)
 
 	count, err := bulletprooftxmanager.CountUnstartedTransactions(db, fromAddress, cltest.FixtureChainID)
 	require.NoError(t, err)
@@ -185,7 +185,7 @@ func TestBulletproofTxManager_CreateEthTransaction(t *testing.T) {
 	config.On("GasEstimatorMode").Return("FixedPrice")
 	ethClient := cltest.NewEthClientMockWithDefaultChain(t)
 
-	bptxm := bulletprooftxmanager.NewBulletproofTxManager(db, ethClient, config, nil, nil, nil, logger.Default)
+	bptxm := bulletprooftxmanager.NewBulletproofTxManager(db, ethClient, config, nil, nil, logger.Default)
 
 	t.Run("with queue under capacity inserts eth_tx", func(t *testing.T) {
 		subject := uuid.NewV4()
@@ -266,6 +266,32 @@ func TestBulletproofTxManager_CreateEthTransaction(t *testing.T) {
 
 		assert.Equal(t, tx1.ID, tx2.ID)
 	})
+
+	t.Run("returns error if eth key state is missing or doesn't match chain ID", func(t *testing.T) {
+		config.On("EvmMaxQueuedTransactions").Return(uint64(3)).Twice()
+		rndAddr := cltest.NewAddress()
+		_, err := bptxm.CreateEthTransaction(db, bulletprooftxmanager.NewTx{
+			FromAddress:    rndAddr,
+			ToAddress:      cltest.NewAddress(),
+			EncodedPayload: []byte{1, 2, 3},
+			GasLimit:       21000,
+			Strategy:       bulletprooftxmanager.SendEveryStrategy{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fmt.Sprintf("no eth key exists with address %s", rndAddr.Hex()))
+
+		_, otherAddress := cltest.MustInsertRandomKey(t, keyStore.Eth(), *utils.NewBigI(1337), 0)
+
+		_, err = bptxm.CreateEthTransaction(db, bulletprooftxmanager.NewTx{
+			FromAddress:    otherAddress,
+			ToAddress:      cltest.NewAddress(),
+			EncodedPayload: []byte{1, 2, 3},
+			GasLimit:       21000,
+			Strategy:       bulletprooftxmanager.SendEveryStrategy{},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fmt.Sprintf("cannot send transaction on chain ID 0; eth key with address %s is pegged to chain ID 1337", otherAddress.Hex()))
+	})
 }
 
 func TestBulletproofTxManager_CreateEthTransaction_OutOfEth(t *testing.T) {
@@ -284,7 +310,7 @@ func TestBulletproofTxManager_CreateEthTransaction_OutOfEth(t *testing.T) {
 	config.On("EthTxReaperThreshold").Return(time.Duration(0))
 	config.On("GasEstimatorMode").Return("FixedPrice")
 	ethClient := cltest.NewEthClientMockWithDefaultChain(t)
-	bptxm := bulletprooftxmanager.NewBulletproofTxManager(db, ethClient, config, nil, nil, nil, logger.Default)
+	bptxm := bulletprooftxmanager.NewBulletproofTxManager(db, ethClient, config, nil, nil, logger.Default)
 
 	t.Run("if another key has any transactions with insufficient eth errors, transmits as normal", func(t *testing.T) {
 		payload := cltest.MustRandomBytes(t, 100)
@@ -336,7 +362,7 @@ func TestBulletproofTxManager_CreateEthTransaction_OutOfEth(t *testing.T) {
 
 	t.Run("if this key has transactions but no insufficient eth errors, transmits as normal", func(t *testing.T) {
 		payload := cltest.MustRandomBytes(t, 100)
-		cltest.MustInsertConfirmedEthTxWithAttempt(t, db, 0, 42, thisKey.Address.Address())
+		cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, db, 0, 42, thisKey.Address.Address())
 		strategy := new(bptxmmocks.TxStrategy)
 		strategy.On("Subject").Return(uuid.NullUUID{})
 		strategy.On("PruneQueue", mock.AnythingOfType("*gorm.DB")).Return(int64(0), nil)
@@ -365,7 +391,6 @@ func TestBulletproofTxManager_Lifecycle(t *testing.T) {
 	config.Test(t)
 	kst := new(ksmocks.Eth)
 	kst.Test(t)
-	advisoryLocker := &postgres.NullAdvisoryLocker{}
 	eventBroadcaster := new(pgmocks.EventBroadcaster)
 	eventBroadcaster.Test(t)
 
@@ -381,7 +406,7 @@ func TestBulletproofTxManager_Lifecycle(t *testing.T) {
 	unsub := cltest.NewAwaiter()
 	kst.On("SubscribeToKeyChanges").Return(keyChangeCh, unsub.ItHappened)
 
-	bptxm := bulletprooftxmanager.NewBulletproofTxManager(db, ethClient, config, kst, advisoryLocker, eventBroadcaster, logger.Default)
+	bptxm := bulletprooftxmanager.NewBulletproofTxManager(db, ethClient, config, kst, eventBroadcaster, logger.Default)
 
 	head := cltest.Head(42)
 	// It should not hang or panic

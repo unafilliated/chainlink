@@ -14,20 +14,20 @@ import (
 
 	"github.com/pelletier/go-toml"
 	"github.com/smartcontractkit/chainlink/core/auth"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	"github.com/smartcontractkit/chainlink/core/cmd"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/job"
-	"github.com/smartcontractkit/chainlink/core/store/models"
+	"github.com/smartcontractkit/chainlink/core/sessions"
 	"github.com/smartcontractkit/chainlink/core/store/presenters"
 	"github.com/smartcontractkit/chainlink/core/web"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
 	"gopkg.in/guregu/null.v4"
-	"gorm.io/gorm"
 )
 
 var (
@@ -69,14 +69,9 @@ func startNewApplication(t *testing.T, setup ...func(opts *startOptions)) *cltes
 		sopts.SetConfig(config)
 	}
 
-	var app *cltest.TestApplication
-	var cleanup func()
 	l := config.CreateProductionLogger().With("testname", t.Name())
 	sopts.FlagsAndDeps = append(sopts.FlagsAndDeps, l)
-	app, cleanup = cltest.NewApplicationWithConfigAndKey(t, config, sopts.FlagsAndDeps...)
-	t.Cleanup(cleanup)
-	app.Logger = l
-	app.Logger.SetDB(app.GetStore().DB)
+	app := cltest.NewApplicationWithConfigAndKey(t, config, sopts.FlagsAndDeps...)
 
 	require.NoError(t, app.Start())
 
@@ -102,13 +97,12 @@ func withKey() func(opts *startOptions) {
 	}
 }
 
-func newEthMock(t *testing.T) *mocks.Client {
+func newEthMock(t *testing.T) (*mocks.Client, func()) {
 	t.Helper()
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
-	t.Cleanup(assertMocksCalled)
 
-	return ethClient
+	return ethClient, assertMocksCalled
 }
 
 func keyNameForTest(t *testing.T) string {
@@ -168,10 +162,8 @@ func TestClient_CreateExternalInitiator(t *testing.T) {
 			err := client.CreateExternalInitiator(c)
 			require.NoError(t, err)
 
-			var exi models.ExternalInitiator
-			err = app.Store.RawDBWithAdvisoryLock(func(db *gorm.DB) error {
-				return db.Where("name = ?", test.args[0]).Find(&exi).Error
-			})
+			var exi bridges.ExternalInitiator
+			err = app.GetDB().Where("name = ?", test.args[0]).Find(&exi).Error
 			require.NoError(t, err)
 
 			if len(test.args) > 1 {
@@ -199,7 +191,7 @@ func TestClient_CreateExternalInitiator_Errors(t *testing.T) {
 			app := startNewApplication(t)
 			client, _ := app.NewClientAndRenderer()
 
-			initialExis := len(cltest.AllExternalInitiators(t, app.Store))
+			initialExis := len(cltest.AllExternalInitiators(t, app.GetDB()))
 
 			set := flag.NewFlagSet("create", 0)
 			assert.NoError(t, set.Parse(test.args))
@@ -208,7 +200,7 @@ func TestClient_CreateExternalInitiator_Errors(t *testing.T) {
 			err := client.CreateExternalInitiator(c)
 			assert.Error(t, err)
 
-			exis := cltest.AllExternalInitiators(t, app.Store)
+			exis := cltest.AllExternalInitiators(t, app.GetDB())
 			assert.Len(t, exis, initialExis)
 		})
 	}
@@ -221,11 +213,11 @@ func TestClient_DestroyExternalInitiator(t *testing.T) {
 	client, r := app.NewClientAndRenderer()
 
 	token := auth.NewToken()
-	exi, err := models.NewExternalInitiator(token,
-		&models.ExternalInitiatorRequest{Name: "name"},
+	exi, err := bridges.NewExternalInitiator(token,
+		&bridges.ExternalInitiatorRequest{Name: "name"},
 	)
 	require.NoError(t, err)
-	err = app.Store.CreateExternalInitiator(exi)
+	err = app.BridgeORM().CreateExternalInitiator(exi)
 	require.NoError(t, err)
 
 	set := flag.NewFlagSet("test", 0)
@@ -324,9 +316,11 @@ func TestClient_ChangePassword(t *testing.T) {
 func TestClient_SetDefaultGasPrice(t *testing.T) {
 	t.Parallel()
 
+	ethMock, assertMocksCalled := newEthMock(t)
+	defer assertMocksCalled()
 	app := startNewApplication(t,
 		withKey(),
-		withMocks(newEthMock(t)),
+		withMocks(ethMock),
 		withConfigSet(func(c *configtest.TestGeneralConfig) {
 			c.Overrides.EVMDisabled = null.BoolFrom(false)
 			c.Overrides.GlobalEvmNonceAutoSync = null.BoolFrom(false)
@@ -424,9 +418,9 @@ func TestClient_RunOCRJob_HappyPath(t *testing.T) {
 	app.KeyStore.P2P().Add(cltest.DefaultP2PKey)
 
 	_, bridge := cltest.NewBridgeType(t, "voter_turnout", "http://blah.com")
-	require.NoError(t, app.Store.DB.Create(bridge).Error)
+	require.NoError(t, app.GetDB().Create(bridge).Error)
 	_, bridge2 := cltest.NewBridgeType(t, "election_winner", "http://blah.com")
-	require.NoError(t, app.Store.DB.Create(bridge2).Error)
+	require.NoError(t, app.GetDB().Create(bridge2).Error)
 
 	var ocrJobSpecFromFile job.Job
 	tree, err := toml.LoadFile("../testdata/tomlspecs/oracle-spec.toml")
@@ -483,9 +477,9 @@ func TestClient_AutoLogin(t *testing.T) {
 	app := startNewApplication(t)
 
 	user := cltest.MustRandomUser()
-	require.NoError(t, app.Store.SaveUser(&user))
+	require.NoError(t, app.SessionORM().CreateUser(&user))
 
-	sr := models.SessionRequest{
+	sr := sessions.SessionRequest{
 		Email:    user.Email,
 		Password: cltest.Password,
 	}
@@ -498,7 +492,7 @@ func TestClient_AutoLogin(t *testing.T) {
 	require.NoError(t, err)
 
 	// Expire the session and then try again
-	require.NoError(t, app.GetStore().ORM.DB.Exec("delete from sessions;").Error)
+	require.NoError(t, app.GetDB().Exec("delete from sessions;").Error)
 	err = client.ListJobsV2(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
 }
@@ -509,9 +503,9 @@ func TestClient_AutoLogin_AuthFails(t *testing.T) {
 	app := startNewApplication(t)
 
 	user := cltest.MustRandomUser()
-	require.NoError(t, app.Store.SaveUser(&user))
+	require.NoError(t, app.SessionORM().CreateUser(&user))
 
-	sr := models.SessionRequest{
+	sr := sessions.SessionRequest{
 		Email:    user.Email,
 		Password: cltest.Password,
 	}
@@ -531,7 +525,7 @@ func (FailingAuthenticator) Cookie() (*http.Cookie, error) {
 }
 
 // Authenticate retrieves a session ID via a cookie and saves it to disk.
-func (FailingAuthenticator) Authenticate(sessionRequest models.SessionRequest) (*http.Cookie, error) {
+func (FailingAuthenticator) Authenticate(sessionRequest sessions.SessionRequest) (*http.Cookie, error) {
 	return nil, errors.New("no luck")
 }
 
@@ -585,7 +579,7 @@ func TestClient_SetPkgLogLevel(t *testing.T) {
 	err := client.SetLogPkg(c)
 	require.NoError(t, err)
 
-	level, err := app.Logger.ServiceLogLevel(logPkg)
-	require.NoError(t, err)
+	level, ok := logger.NewORM(app.GetDB()).GetServiceLogLevel(logPkg)
+	require.True(t, ok)
 	assert.Equal(t, logLevel, level)
 }

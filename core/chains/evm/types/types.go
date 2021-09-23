@@ -29,7 +29,9 @@ type ChainConfigORM interface {
 //go:generate mockery --name ORM --output ./../mocks/ --case=underscore
 type ORM interface {
 	EnabledChainsWithNodes() ([]Chain, error)
+	Chain(id utils.Big) (chain Chain, err error)
 	CreateChain(id utils.Big, config ChainCfg) (Chain, error)
+	UpdateChain(id utils.Big, enabled bool, config ChainCfg) (Chain, error)
 	DeleteChain(id utils.Big) error
 	Chains(offset, limit int) ([]Chain, int, error)
 	CreateNode(data NewNode) (Node, error)
@@ -44,6 +46,7 @@ type ChainCfg struct {
 	BlockHistoryEstimatorBlockHistorySize null.Int
 	EthTxReaperThreshold                  *models.Duration
 	EthTxResendAfterThreshold             *models.Duration
+	EvmEIP1559DynamicFees                 null.Bool
 	EvmFinalityDepth                      null.Int
 	EvmGasBumpPercent                     null.Int
 	EvmGasBumpTxDepth                     null.Int
@@ -51,6 +54,8 @@ type ChainCfg struct {
 	EvmGasLimitDefault                    null.Int
 	EvmGasLimitMultiplier                 null.Float
 	EvmGasPriceDefault                    *utils.Big
+	EvmGasTipCapDefault                   *utils.Big
+	EvmGasTipCapMinimum                   *utils.Big
 	EvmHeadTrackerHistoryDepth            null.Int
 	EvmHeadTrackerMaxBufferSize           null.Int
 	EvmHeadTrackerSamplingInterval        *models.Duration
@@ -64,6 +69,7 @@ type ChainCfg struct {
 	MinRequiredOutgoingConfirmations      null.Int
 	MinimumContractPayment                *assets.Link
 	OCRObservationTimeout                 *models.Duration
+	KeySpecific                           map[string]ChainCfg
 }
 
 func (c *ChainCfg) Scan(value interface{}) error {

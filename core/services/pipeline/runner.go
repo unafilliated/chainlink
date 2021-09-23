@@ -208,16 +208,6 @@ func (r *runner) ExecuteRun(
 		return run, nil, errors.Wrapf(err, "unexpected async run for spec ID %v, tried executing via ExecuteAndInsertFinishedRun", spec.ID)
 	}
 
-	if run.FailEarly {
-		// return before FinalResult() panics
-		return run, taskRunResults, nil
-	}
-
-	finalResult := taskRunResults.FinalResult()
-	if finalResult.HasErrors() {
-		PromPipelineRunErrors.WithLabelValues(fmt.Sprintf("%d", spec.JobID), spec.JobName).Inc()
-	}
-
 	return run, taskRunResults, nil
 }
 
@@ -239,6 +229,7 @@ func (r *runner) initializePipeline(run *Run) (*Pipeline, error) {
 			task.(*BridgeTask).db = r.orm.DB()
 		case TaskTypeETHCall:
 			task.(*ETHCallTask).chainSet = r.chainSet
+			task.(*ETHCallTask).config = r.config
 		case TaskTypeVRF:
 			task.(*VRFTask).keyStore = r.vrfKeyStore
 		case TaskTypeVRFV2:
@@ -353,6 +344,7 @@ func (r *runner) run(
 
 		if run.HasErrors() {
 			run.State = RunStatusErrored
+			PromPipelineRunErrors.WithLabelValues(fmt.Sprintf("%d", run.PipelineSpec.JobID), run.PipelineSpec.JobName).Inc()
 		} else {
 			run.State = RunStatusCompleted
 		}
@@ -425,7 +417,7 @@ func logTaskRunToPrometheus(trr TaskRunResult, spec Spec) {
 	PromPipelineTasksTotalFinished.WithLabelValues(fmt.Sprintf("%d", spec.JobID), spec.JobName, trr.Task.DotID(), string(trr.Task.Type()), status).Inc()
 }
 
-// ExecuteAndInsertNewRun executes a run in memory then inserts the finished run/task run records, returning the final result
+// ExecuteAndInsertFinishedRun executes a run in memory then inserts the finished run/task run records, returning the final result
 func (r *runner) ExecuteAndInsertFinishedRun(ctx context.Context, spec Spec, vars Vars, l logger.Logger, saveSuccessfulTaskRuns bool) (runID int64, finalResult FinalResult, err error) {
 	run, trrs, err := r.ExecuteRun(ctx, spec, vars, l)
 	if err != nil {
@@ -454,7 +446,12 @@ func (r *runner) Run(ctx context.Context, run *Run, l logger.Logger, saveSuccess
 
 	preinsert := pipeline.RequiresPreInsert()
 
-	err = postgres.GormTransactionWithDefaultContext(r.orm.DB(), func(tx *gorm.DB) error {
+	queryCtx, cancel := postgres.DefaultQueryCtxWithParent(ctx)
+	defer cancel()
+
+	err = postgres.NewGormTransactionManager(r.orm.DB()).TransactWithContext(queryCtx, func(ctx context.Context) error {
+		tx := postgres.TxFromContext(ctx, r.orm.DB())
+
 		// OPTIMISATION: avoid an extra db write if there is no async tasks present or if this is a resumed run
 		if preinsert && run.ID == 0 {
 			now := time.Now()
@@ -476,14 +473,13 @@ func (r *runner) Run(ctx context.Context, run *Run, l logger.Logger, saveSuccess
 			if err = r.orm.CreateRun(postgres.UnwrapGorm(tx), run); err != nil {
 				return err
 			}
-
 		}
 
 		if fn != nil {
 			return fn(tx)
 		}
 		return nil
-	})
+	}, postgres.WithoutDeadline())
 	if err != nil {
 		return false, err
 	}
@@ -542,7 +538,7 @@ func (r *runner) ResumeRun(taskID uuid.UUID, result interface{}) error {
 	if start {
 		// start the runner again
 		go func() {
-			if _, err := r.Run(context.Background(), &run, *logger.Default, false, nil); err != nil {
+			if _, err := r.Run(context.Background(), &run, logger.Default, false, nil); err != nil {
 				logger.Errorw("Resume", "err", err)
 			}
 		}()
@@ -602,7 +598,7 @@ func (r *runner) scheduleUnfinishedRuns() {
 
 	err := r.orm.GetUnfinishedRuns(now, func(run Run) error {
 		go func() {
-			if _, err := r.Run(context.TODO(), &run, *logger.Default, false, nil); err != nil {
+			if _, err := r.Run(context.TODO(), &run, logger.Default, false, nil); err != nil {
 				logger.Errorw("Pipeline run init job resumption failed", "error", err)
 			}
 		}()

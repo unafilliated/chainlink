@@ -10,6 +10,7 @@ import (
 
 type ChainResource struct {
 	JAID
+	Enabled   bool           `json:"enabled"`
 	Config    types.ChainCfg `json:"config"`
 	CreatedAt time.Time      `json:"createdAt"`
 	UpdatedAt time.Time      `json:"updatedAt"`
@@ -24,6 +25,7 @@ func NewChainResource(chain types.Chain) ChainResource {
 	return ChainResource{
 		JAID:      NewJAIDInt64(chain.ID.ToInt().Int64()),
 		Config:    chain.Cfg,
+		Enabled:   chain.Enabled,
 		CreatedAt: chain.CreatedAt,
 		UpdatedAt: chain.UpdatedAt,
 	}
