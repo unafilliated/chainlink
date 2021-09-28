@@ -179,11 +179,8 @@ func initLogConfig(dir string, jsonConsole bool, lvl zapcore.Level, toDisk bool)
 
 // CreateProductionLogger returns a log config for the passed directory
 // with the given LogLevel and customizes stdout for pretty printing.
-func CreateProductionLogger(
-	dir string, jsonConsole bool, lvl zapcore.Level, toDisk bool) Logger {
-	config := initLogConfig(dir, jsonConsole, lvl, toDisk)
-
-	zl, err := config.Build(zap.AddCallerSkip(1))
+func CreateProductionLogger(dir string, jsonConsole bool, lvl zapcore.Level, toDisk bool) Logger {
+	zl, err := initLogConfig(dir, jsonConsole, lvl, toDisk).Build()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -201,9 +198,7 @@ func (l *zapLogger) NewServiceLevelLogger(serviceName string, logLevel string) (
 		return nil, err
 	}
 
-	config := initLogConfig(l.dir, l.jsonConsole, ll, l.toDisk)
-
-	zl, err := config.Build(zap.AddCallerSkip(1))
+	zl, err := initLogConfig(l.dir, l.jsonConsole, ll, l.toDisk).Build()
 	if err != nil {
 		return nil, err
 	}
