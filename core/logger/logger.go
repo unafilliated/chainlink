@@ -15,7 +15,9 @@ import (
 // Logger is the main interface of this package.
 // It implements uber/zap's SugaredLogger interface and adds conditional logging helpers.
 type Logger interface {
-	// Named creates a new named logger with the given name
+	// Named creates a new logger sub-scoped with the given name.
+	// If this Logger is already named, the given name will be suffixed with a
+	// dot separator. Example: 'parent' -> 'parent.name'
 	Named(name string) Logger
 	// With creates a new logger with the given arguments
 	With(args ...interface{}) Logger
@@ -66,6 +68,7 @@ type zapLogger struct {
 	dir         string
 	jsonConsole bool
 	toDisk      bool
+	name        string
 	fields      []interface{}
 }
 
@@ -104,10 +107,17 @@ func copyFields(fields []interface{}, add ...interface{}) []interface{} {
 	return f
 }
 
+func joinName(old, new string) string {
+	if old == "" {
+		return new
+	}
+	return old + "." + new
+}
+
 func (l *zapLogger) Named(name string) Logger {
 	newLogger := *l
-	newLogger.SugaredLogger = l.SugaredLogger.Named(name).With("id", name)
-	newLogger.fields = copyFields(l.fields, "id", name)
+	newLogger.name = joinName(l.name, name)
+	newLogger.SugaredLogger = l.SugaredLogger.Named(name)
 	return &newLogger
 }
 
@@ -199,8 +209,8 @@ func (l *zapLogger) NewServiceLevelLogger(serviceName string, logLevel string) (
 	}
 
 	newLogger := *l
-	newLogger.SugaredLogger = zl.Named(serviceName).Sugar().With(l.fields...)
-	newLogger.fields = copyFields(l.fields)
+	newLogger.name = joinName(l.name, serviceName)
+	newLogger.SugaredLogger = zl.Named(newLogger.name).Sugar().With(l.fields...)
 	return &newLogger, nil
 }
 
