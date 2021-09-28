@@ -45,7 +45,7 @@ type Logger interface {
 	// ErrorIf logs the error if present.
 	ErrorIf(err error, optionalMsg ...string)
 	// ErrorIfCalling calls fn and logs any returned error along with func name.
-	ErrorIfCalling(fn func() error, optionalMsg ...string)
+	ErrorIfCalling(fn func() error)
 
 	Fatal(values ...interface{})
 	Fatalf(format string, values ...interface{})
@@ -129,36 +129,31 @@ func (l *zapLogger) withCallerSkip(skip int) Logger {
 
 func (l *zapLogger) WarnIf(err error) {
 	if err != nil {
-		l.Warn(err)
+		l.withCallerSkip(1).Warn(err)
 	}
 }
 
 func (l *zapLogger) ErrorIf(err error, optionalMsg ...string) {
 	if err != nil {
 		if len(optionalMsg) > 0 {
-			l.Error(errors.Wrap(err, optionalMsg[0]))
-		} else {
-			l.Error(err)
+			err = errors.Wrap(err, optionalMsg[0])
 		}
+		l.withCallerSkip(1).Error(err)
 	}
 }
 
-func (l *zapLogger) ErrorIfCalling(fn func() error, optionalMsg ...string) {
+func (l *zapLogger) ErrorIfCalling(fn func() error) {
 	err := fn()
 	if err != nil {
 		fnName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 		e := errors.Wrap(err, fnName)
-		if len(optionalMsg) > 0 {
-			l.Error(errors.Wrap(e, optionalMsg[0]))
-		} else {
-			l.Error(e)
-		}
+		l.withCallerSkip(1).Error(e)
 	}
 }
 
 func (l *zapLogger) PanicIf(err error) {
 	if err != nil {
-		l.Panic(err)
+		l.withCallerSkip(1).Panic(err)
 	}
 }
 

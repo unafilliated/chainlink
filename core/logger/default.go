@@ -141,8 +141,8 @@ func ErrorIf(err error, optionalMsg ...string) {
 	skipDefault.ErrorIf(err, optionalMsg...)
 }
 
-func ErrorIfCalling(f func() error, optionalMsg ...string) {
-	skipDefault.ErrorIfCalling(f, optionalMsg...)
+func ErrorIfCalling(f func() error) {
+	skipDefault.ErrorIfCalling(f)
 }
 
 // Fatal logs a fatal message then exits the application.
@@ -152,12 +152,12 @@ func Fatal(args ...interface{}) {
 
 // Errorf logs a message at the error level using Sprintf.
 func Errorf(format string, values ...interface{}) {
-	Error(fmt.Sprintf(format, values...))
+	skipDefault.Error(fmt.Sprintf(format, values...))
 }
 
 // Fatalf logs a message at the fatal level using Sprintf.
 func Fatalf(format string, values ...interface{}) {
-	Fatal(fmt.Sprintf(format, values...))
+	skipDefault.Fatal(fmt.Sprintf(format, values...))
 }
 
 // Fatalw logs a message and exits the application
