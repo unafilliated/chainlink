@@ -60,17 +60,14 @@ func setupRegistrySync(t *testing.T) (
 	lbMock := new(logmocks.Broadcaster)
 	lbMock.Test(t)
 	lbMock.On("AddDependents", 1).Maybe()
-	j := cltest.MustInsertKeeperJob(t, db, cltest.NewEIP55Address(), cltest.NewEIP55Address())
+	j := cltest.MustInsertKeeperJob(t, db, cltest.NewEIP55Address(), cltest.NewEIP55Address(), "latest")
 	cfg := cltest.NewTestGeneralConfig(t)
 	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, Client: ethClient, LogBroadcaster: lbMock, GeneralConfig: cfg})
 	ch := evmtest.MustGetDefaultChain(t, cc)
 	keyStore := cltest.NewKeyStore(t, db)
 	jpv2 := cltest.NewJobPipelineV2(t, cfg, cc, db, keyStore)
 	contractAddress := j.KeeperSpec.ContractAddress.Address()
-	contract, err := keeper_registry_wrapper.NewKeeperRegistry(
-		contractAddress,
-		ethClient,
-	)
+	contractWrapper, err := keeper.NewUniversalContractWrapper("latest", contractAddress, ethClient)
 	require.NoError(t, err)
 
 	lbMock.On("Register", mock.Anything, mock.MatchedBy(func(opts log.ListenerOpts) bool {
@@ -79,7 +76,8 @@ func setupRegistrySync(t *testing.T) (
 	lbMock.On("IsConnected").Return(true).Maybe()
 
 	orm := keeper.NewORM(db, nil, ch.Config(), bulletprooftxmanager.SendEveryStrategy{})
-	synchronizer := keeper.NewRegistrySynchronizer(j, contract, orm, jpv2.Jrm, lbMock, syncInterval, 1, logger.Default)
+
+	synchronizer := keeper.NewRegistrySynchronizer(j, contractWrapper, orm, jpv2.Jrm, lbMock, syncInterval, 1, logger.Default)
 	return db, synchronizer, ethClient, lbMock, j
 }
 

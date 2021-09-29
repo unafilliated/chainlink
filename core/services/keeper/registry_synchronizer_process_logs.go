@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper"
+	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper_v1_0_0"
 	"github.com/smartcontractkit/chainlink/core/services/log"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 )
@@ -79,14 +80,21 @@ func (rs *RegistrySynchronizer) handleUpkeepCancelled(broadcast log.Broadcast) {
 	if was {
 		return
 	}
-	broadcastedLog, ok := broadcast.DecodedLog().(*keeper_registry_wrapper.KeeperRegistryUpkeepCanceled)
-	if !ok {
-		rs.logger.Errorf("invariant violation, expected UpkeepCanceled log but got %T", broadcastedLog)
+
+	var upkeepID int64
+	switch log := broadcast.DecodedLog().(type) {
+	case *keeper_registry_wrapper.KeeperRegistryUpkeepCanceled:
+		upkeepID = log.Id.Int64()
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryUpkeepCanceled:
+		upkeepID = log.Id.Int64()
+	default:
+		rs.logger.Errorf("invariant violation, expected UpkeepCanceled log but got %T", log)
 		return
 	}
+
 	ctx, cancel := postgres.DefaultQueryCtx()
 	defer cancel()
-	affected, err := rs.orm.BatchDeleteUpkeepsForJob(ctx, rs.job.ID, []int64{broadcastedLog.Id.Int64()})
+	affected, err := rs.orm.BatchDeleteUpkeepsForJob(ctx, rs.job.ID, []int64{upkeepID})
 	if err != nil {
 		rs.logger.With("error", err).Error("unable to batch delete upkeeps")
 		return
@@ -134,12 +142,19 @@ func (rs *RegistrySynchronizer) HandleUpkeepRegistered(broadcast log.Broadcast, 
 	if was {
 		return
 	}
-	broadcastedLog, ok := broadcast.DecodedLog().(*keeper_registry_wrapper.KeeperRegistryUpkeepRegistered)
-	if !ok {
-		rs.logger.Errorf("invariant violation, expected UpkeepRegistered log but got %T", broadcastedLog)
+
+	var upkeepID int64
+	switch log := broadcast.DecodedLog().(type) {
+	case *keeper_registry_wrapper.KeeperRegistryUpkeepRegistered:
+		upkeepID = log.Id.Int64()
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryUpkeepRegistered:
+		upkeepID = log.Id.Int64()
+	default:
+		rs.logger.Errorf("invariant violation, expected UpkeepCanceled log but got %T", log)
 		return
 	}
-	err = rs.syncUpkeep(registry, broadcastedLog.Id.Int64())
+
+	err = rs.syncUpkeep(registry, upkeepID)
 	if err != nil {
 		rs.logger.With("error", err).Error("failed to sync upkeep, log: %v", broadcast.String())
 		return
@@ -178,9 +193,15 @@ func (rs *RegistrySynchronizer) handleUpkeepPerformed(broadcast log.Broadcast) {
 	if was {
 		return
 	}
-	log, ok := broadcast.DecodedLog().(*keeper_registry_wrapper.KeeperRegistryUpkeepPerformed)
-	if !ok {
-		rs.logger.Errorf("invariant violation, expected UpkeepPerformed log but got %T", log)
+
+	var upkeepID int64
+	switch log := broadcast.DecodedLog().(type) {
+	case *keeper_registry_wrapper.KeeperRegistryUpkeepPerformed:
+		upkeepID = log.Id.Int64()
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryUpkeepPerformed:
+		upkeepID = log.Id.Int64()
+	default:
+		rs.logger.Errorf("invariant violation, expected UpkeepCanceled log but got %T", log)
 		return
 	}
 
@@ -188,7 +209,7 @@ func (rs *RegistrySynchronizer) handleUpkeepPerformed(broadcast log.Broadcast) {
 	defer cancel()
 
 	// set last run to 0 so that keeper can resume checkUpkeep()
-	err = rs.orm.SetLastRunHeightForUpkeepOnJob(ctx, rs.job.ID, log.Id.Int64(), 0)
+	err = rs.orm.SetLastRunHeightForUpkeepOnJob(ctx, rs.job.ID, upkeepID, 0)
 	if err != nil {
 		rs.logger.With("error", err).Error("failed to set last run to 0")
 		return

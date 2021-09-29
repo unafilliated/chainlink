@@ -4,9 +4,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
-	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/log"
@@ -21,7 +18,7 @@ var (
 
 type RegistrySynchronizer struct {
 	chStop           chan struct{}
-	contract         *keeper_registry_wrapper.KeeperRegistry
+	contract         UniversalContractWrapper
 	interval         time.Duration
 	job              job.Job
 	jrm              job.ORM
@@ -45,7 +42,7 @@ type MailRoom struct {
 // NewRegistrySynchronizer is the constructor of RegistrySynchronizer
 func NewRegistrySynchronizer(
 	job job.Job,
-	contract *keeper_registry_wrapper.KeeperRegistry,
+	contract UniversalContractWrapper,
 	orm ORM,
 	jrm job.ORM,
 	logBroadcaster log.Broadcaster,
@@ -79,15 +76,9 @@ func (rs *RegistrySynchronizer) Start() error {
 		go rs.run()
 
 		logListenerOpts := log.ListenerOpts{
-			Contract: rs.contract.Address(),
-			ParseLog: rs.contract.ParseLog,
-			LogsWithTopics: map[common.Hash][][]log.Topic{
-				keeper_registry_wrapper.KeeperRegistryKeepersUpdated{}.Topic():   nil,
-				keeper_registry_wrapper.KeeperRegistryConfigSet{}.Topic():        nil,
-				keeper_registry_wrapper.KeeperRegistryUpkeepCanceled{}.Topic():   nil,
-				keeper_registry_wrapper.KeeperRegistryUpkeepRegistered{}.Topic(): nil,
-				keeper_registry_wrapper.KeeperRegistryUpkeepPerformed{}.Topic():  nil,
-			},
+			Contract:         rs.contract.Address(),
+			ParseLog:         rs.contract.ParseLog,
+			LogsWithTopics:   rs.contract.LogsWithTopics(),
 			NumConfirmations: rs.minConfirmations,
 		}
 		lbUnsubscribe := rs.logBroadcaster.Register(rs, logListenerOpts)

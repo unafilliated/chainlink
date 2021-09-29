@@ -72,6 +72,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
 
   struct Config {
     uint32 paymentPremiumPPB;
+    uint32 flatFeeMicroLink; // min 0.000001 LINK, max 4294 LINK
     uint24 blockCountPerTurn;
     uint32 checkGasLimit;
     uint24 stalenessSeconds;
@@ -101,6 +102,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
   event FundsWithdrawn(uint256 indexed id, uint256 amount, address to);
   event ConfigSet(
     uint32 paymentPremiumPPB,
+    uint32 flatFeeMicroLink,
     uint24 blockCountPerTurn,
     uint32 checkGasLimit,
     uint24 stalenessSeconds,
@@ -120,6 +122,9 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
    * @param fastGasFeed address of the Fast Gas price feed
    * @param paymentPremiumPPB payment premium rate oracles receive on top of
    * being reimbursed for gas, measured in parts per billion
+   * @param flatFeeMicroLink flat fee paid to oracles for performing upkeeps,
+   * priced in MicroLink; can be used in conjunction with or independently of
+   * paymentPremiumPPB
    * @param blockCountPerTurn number of blocks each oracle has during their turn to
    * perform upkeep before it will be the next keeper's turn to submit
    * @param checkGasLimit gas limit when checking for upkeep
@@ -135,6 +140,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
     address linkEthFeed,
     address fastGasFeed,
     uint32 paymentPremiumPPB,
+    uint32 flatFeeMicroLink,
     uint24 blockCountPerTurn,
     uint32 checkGasLimit,
     uint24 stalenessSeconds,
@@ -148,6 +154,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
 
     setConfig(
       paymentPremiumPPB,
+      flatFeeMicroLink,
       blockCountPerTurn,
       checkGasLimit,
       stalenessSeconds,
@@ -397,6 +404,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
    * @notice updates the configuration of the registry
    * @param paymentPremiumPPB payment premium rate oracles receive on top of
    * being reimbursed for gas, measured in parts per billion
+   * @param flatFeeMicroLink flat fee paid to oracles for performing upkeeps
    * @param blockCountPerTurn number of blocks an oracle should wait before
    * checking for upkeep
    * @param checkGasLimit gas limit when checking for upkeep
@@ -407,6 +415,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
    */
   function setConfig(
     uint32 paymentPremiumPPB,
+    uint32 flatFeeMicroLink,
     uint24 blockCountPerTurn,
     uint32 checkGasLimit,
     uint24 stalenessSeconds,
@@ -416,6 +425,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
   ) public onlyOwner {
     s_config = Config({
       paymentPremiumPPB: paymentPremiumPPB,
+      flatFeeMicroLink: flatFeeMicroLink,
       blockCountPerTurn: blockCountPerTurn,
       checkGasLimit: checkGasLimit,
       stalenessSeconds: stalenessSeconds,
@@ -426,6 +436,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
 
     emit ConfigSet(
       paymentPremiumPPB,
+      flatFeeMicroLink,
       blockCountPerTurn,
       checkGasLimit,
       stalenessSeconds,
@@ -561,6 +572,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
     override
     returns (
       uint32 paymentPremiumPPB,
+      uint32 flatFeeMicroLink,
       uint24 blockCountPerTurn,
       uint32 checkGasLimit,
       uint24 stalenessSeconds,
@@ -572,6 +584,7 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
     Config memory config = s_config;
     return (
       config.paymentPremiumPPB,
+      config.flatFeeMicroLink,
       config.blockCountPerTurn,
       config.checkGasLimit,
       config.stalenessSeconds,
@@ -633,9 +646,10 @@ contract KeeperRegistry is ConfirmedOwner, KeeperBase, ReentrancyGuard, Pausable
     uint256 gasWei,
     uint256 linkEth
   ) private view returns (uint96 payment) {
+    Config memory config = s_config;
     uint256 weiForGas = gasWei.mul(gasLimit.add(REGISTRY_GAS_OVERHEAD));
-    uint256 premium = PPB_BASE.add(s_config.paymentPremiumPPB);
-    uint256 total = weiForGas.mul(1e9).mul(premium).div(linkEth);
+    uint256 premium = PPB_BASE.add(config.paymentPremiumPPB);
+    uint256 total = weiForGas.mul(1e9).mul(premium).div(linkEth).add(uint256(config.flatFeeMicroLink).mul(1e12));
     require(total <= LINK_TOTAL_SUPPLY, "payment greater than all LINK");
     return uint96(total); // LINK_TOTAL_SUPPLY < UINT96_MAX
   }

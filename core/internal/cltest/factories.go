@@ -519,11 +519,18 @@ func MakeDirectRequestJobSpec(t *testing.T) *job.Job {
 	return spec
 }
 
-func MustInsertKeeperJob(t *testing.T, db *gorm.DB, from ethkey.EIP55Address, contract ethkey.EIP55Address) job.Job {
+func MustInsertKeeperJob(
+	t *testing.T,
+	db *gorm.DB,
+	from ethkey.EIP55Address,
+	contract ethkey.EIP55Address,
+	contractVersion string,
+) job.Job {
 	t.Helper()
 
 	keeperSpec := job.KeeperSpec{
 		ContractAddress: contract,
+		ContractVersion: contractVersion,
 		FromAddress:     from,
 	}
 	err := db.Create(&keeperSpec).Error
@@ -578,7 +585,7 @@ func MustInsertKeeperRegistry(t *testing.T, db *gorm.DB, ethKeyStore keystore.Et
 	from := key.Address
 	t.Helper()
 	contractAddress := NewEIP55Address()
-	job := MustInsertKeeperJob(t, db, from, contractAddress)
+	job := MustInsertKeeperJob(t, db, from, contractAddress, "latest")
 	registry := keeper.Registry{
 		ContractAddress:   contractAddress,
 		BlockCountPerTurn: 20,

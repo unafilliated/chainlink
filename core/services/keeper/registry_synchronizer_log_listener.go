@@ -4,6 +4,7 @@ import (
 	"reflect"
 
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper"
+	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper_v1_0_0"
 	"github.com/smartcontractkit/chainlink/core/services/log"
 )
 
@@ -41,6 +42,21 @@ func (rs *RegistrySynchronizer) HandleLog(broadcast log.Broadcast) {
 		wasOverCapacity = rs.mailRoom.mbUpkeepRegistered.Deliver(broadcast)
 		mailboxName = "mbUpkeepRegistered"
 	case *keeper_registry_wrapper.KeeperRegistryUpkeepPerformed:
+		wasOverCapacity = rs.mailRoom.mbUpkeepPerformed.Deliver(broadcast)
+		mailboxName = "mbUpkeepPerformed"
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryKeepersUpdated:
+		wasOverCapacity = rs.mailRoom.mbSyncRegistry.Deliver(broadcast) // same mailbox because same action
+		mailboxName = "mbSyncRegistry"
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryConfigSet:
+		wasOverCapacity = rs.mailRoom.mbSyncRegistry.Deliver(broadcast) // same mailbox because same action
+		mailboxName = "mbSyncRegistry"
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryUpkeepCanceled:
+		wasOverCapacity = rs.mailRoom.mbUpkeepCanceled.Deliver(broadcast)
+		mailboxName = "mbUpkeepCanceled"
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryUpkeepRegistered:
+		wasOverCapacity = rs.mailRoom.mbUpkeepRegistered.Deliver(broadcast)
+		mailboxName = "mbUpkeepRegistered"
+	case *keeper_registry_wrapper_v1_0_0.KeeperRegistryUpkeepPerformed:
 		wasOverCapacity = rs.mailRoom.mbUpkeepPerformed.Deliver(broadcast)
 		mailboxName = "mbUpkeepPerformed"
 	default:
