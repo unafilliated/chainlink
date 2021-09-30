@@ -108,7 +108,7 @@ func Test_ParseCBOR(t *testing.T) {
 			b, err := hexutil.Decode(test.in)
 			assert.NoError(t, err)
 
-			json, err := ParseCBOR(b)
+			json, err := ParseDietCBOR(b)
 			if test.wantErrored {
 				assert.Error(t, err)
 			} else {
