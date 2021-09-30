@@ -18,8 +18,12 @@ library CBORChainlink {
   uint8 private constant TAG_TYPE_BIGNUM = 2;
   uint8 private constant TAG_TYPE_NEGATIVE_BIGNUM = 3;
 
-  function encodeFixedNumeric(BufferChainlink.buffer memory buf, uint8 major, uint64 value) private pure {
-    if(value <= 23) {
+  function encodeFixedNumeric(
+    BufferChainlink.buffer memory buf,
+    uint8 major,
+    uint64 value
+  ) private pure {
+    if (value <= 23) {
       buf.appendUint8(uint8((major << 5) | value));
     } else if (value <= 0xFF) {
       buf.appendUint8(uint8((major << 5) | 24));
@@ -40,20 +44,20 @@ library CBORChainlink {
     buf.appendUint8(uint8((major << 5) | 31));
   }
 
-  function encodeUInt(BufferChainlink.buffer memory buf, uint value) internal pure {
-    if(value > 0xFFFFFFFFFFFFFFFF) {
+  function encodeUInt(BufferChainlink.buffer memory buf, uint256 value) internal pure {
+    if (value > 0xFFFFFFFFFFFFFFFF) {
       encodeBigNum(buf, value);
     } else {
       encodeFixedNumeric(buf, MAJOR_TYPE_INT, uint64(value));
     }
   }
 
-  function encodeInt(BufferChainlink.buffer memory buf, int value) internal pure {
-    if(value < -0x10000000000000000) {
+  function encodeInt(BufferChainlink.buffer memory buf, int256 value) internal pure {
+    if (value < -0x10000000000000000) {
       encodeSignedBigNum(buf, value);
-    } else if(value > 0xFFFFFFFFFFFFFFFF) {
-      encodeBigNum(buf, uint(value));
-    } else if(value >= 0) {
+    } else if (value > 0xFFFFFFFFFFFFFFFF) {
+      encodeBigNum(buf, uint256(value));
+    } else if (value >= 0) {
       encodeFixedNumeric(buf, MAJOR_TYPE_INT, uint64(uint256(value)));
     } else {
       encodeFixedNumeric(buf, MAJOR_TYPE_NEGATIVE_INT, uint64(uint256(-1 - value)));
@@ -65,12 +69,12 @@ library CBORChainlink {
     buf.append(value);
   }
 
-  function encodeBigNum(BufferChainlink.buffer memory buf, uint value) internal pure {
+  function encodeBigNum(BufferChainlink.buffer memory buf, uint256 value) internal pure {
     buf.appendUint8(uint8((MAJOR_TYPE_TAG << 5) | TAG_TYPE_BIGNUM));
     encodeBytes(buf, abi.encode(value));
   }
 
-  function encodeSignedBigNum(BufferChainlink.buffer memory buf, int input) internal pure {
+  function encodeSignedBigNum(BufferChainlink.buffer memory buf, int256 input) internal pure {
     buf.appendUint8(uint8((MAJOR_TYPE_TAG << 5) | TAG_TYPE_NEGATIVE_BIGNUM));
     encodeBytes(buf, abi.encode(uint256(-1 - input)));
   }
